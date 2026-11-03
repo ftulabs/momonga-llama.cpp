@@ -32,17 +32,24 @@ replaces them follows.
 
 ## What has been measured (do not re-derive)
 
-- **34.30-34.49 tok/s**, 400 generated tokens, greedy, median of 5: `--spec-draft-n-max 6
-  --spec-draft-p-min 0.5 -ub 32 -b 32 -ctk q8_0 -ctv q8_0`, draft acceptance 0.967, mean draft
-  length 5.68. The best unpatched configuration is 31.50 at `n-max 3`; plain decode with no
-  speculation is 16.9.
+- **36.56 tok/s**, 400 generated tokens, greedy, median of 5: `--spec-draft-n-max 6
+  --spec-draft-p-min 0.5 -ub 32 -b 32 -ctk q8_0 -ctv q8_0`, draft acceptance 0.96657, mean
+  draft length 5.68. The best unpatched configuration is 31.50 at `n-max 3`; plain decode with
+  no speculation is 16.9. The stack underneath: 35.07 from the MoE launch bounds, 34.30 without
+  them, and the dense MMVQ commit on top for the last 4.3%.
 - **The 9.5% comes from drafting deeper, not from the kernel being faster at a given batch.** The
   patch does nothing at batch 4, where both paths were already legal. It removes a cliff above
   4-5 columns that made every deeper config pay MMQ.
-- **`n-max 7` is slower** than 6. **`rows_per_block = 4`** wins in a microbenchmark and loses
-  0.7% at the model level; the default stays 2.
-- **The board is not bandwidth-starved**: 32-35% of a measured 110 GB/s. The remaining cost is
-  IQ3_S expert matmul being ALU-bound, which no launch parameter reaches.
+- **`n-max 7` is slower** than 6. **`rows_per_block = 4` on the dense path** is now the default
+  and wins at the model level (+4.3% together with the carveout, the launch bounds and the
+  wider `small_k` trigger). *Corrected:* the old note here said it loses 0.7% and that the
+  default stays 2. That measurement was taken without the 64 KB carveout, which is part of the
+  change and not tuning on top of it. The MoE kernel's own `GGML_CUDA_MOE_RPB` hook is still a
+  model-level loss and still defaults to 2.
+- **The board is not bandwidth-starved**: 32-35% of a measured 110 GB/s. *Corrected:* the IQ3_S
+  expert matmul is not ALU-bound either - hardware counters put `long_scoreboard` (waiting on a
+  load) ahead of `math_pipe_throttle`. It was occupancy-limited by a launch-bounds declaration
+  that named a 256-thread block for a 32-thread kernel, and fixing that was worth +2.25%.
 - Measurement discipline that produced those numbers: 5 reps and a median for anything under 2%,
   never extrapolate a microbenchmark across batch sizes, report draft acceptance with every
   weight or config change, and write a negative result down with the same care as a positive one.

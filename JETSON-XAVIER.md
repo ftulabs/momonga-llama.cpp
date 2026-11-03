@@ -1,9 +1,10 @@
 # Jetson AGX Xavier (Volta sm_72) local changes
 
-This fork carries two commits on top of `ggml-org/llama.cpp` that exist to make one model decode
+This fork carries CUDA changes on top of `ggml-org/llama.cpp` that exist to make one model decode
 faster on one board: Jetson AGX Xavier, Volta sm_72, CUDA 11.4. They are not proposed upstream -
 they are either board-specific or debug scaffolding - and the numbers below come from a single
-machine.
+machine. Current record on this board: **36.56 tok/s** at `--spec-draft-n-max 6`, up from 31.50
+before any of it.
 
     git log --oneline upstream/master..HEAD
 
@@ -36,10 +37,45 @@ below the 34.49 measured on `dde879b`, which 5 reps cannot resolve from noise.
 
 The same file also reads `GGML_CUDA_MOE_RPB` (rows per block in the MoE kernel) and
 `GGML_CUDA_SMALLK`, both experiment hooks that default to the upstream behaviour. The
-rows-per-block one only reproduced a microbenchmark win that is a model-level loss, so the
-default stays 2.
+rows-per-block hook is for the MoE kernel only; the dense-path row count below is compiled in
+and is not switchable.
 
-## 2. `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME`
+## 2. `cuda : run the IQ3_S MoE kernel at 64 registers instead of 79`
+
+`mul_mat_vec_q_moe` declared `__launch_bounds__(256, 1)` while the kernel is launched with 32
+threads, so the second argument was inert and the compiler spent 79 registers. That capped
+residency at 24 one-warp blocks per SM, or 37.5% occupancy. Declaring the real block size and
+32 blocks per SM - for IQ3_S only, because a blanket 64-register budget makes Q6_K spill -
+gives 64 registers and 47.9% occupancy. Kernel time falls 7.6% and the model goes 34.30 ->
+35.07 tok/s (+2.25%) with acceptance unchanged at 0.96657 and mean length 5.68.
+
+32 blocks per SM is the sm_72 maximum and all four occupancy limits (blocks, registers, shared,
+warps) now sit at 32, so this kernel is finished for a one-warp block.
+
+## 3. `cuda : four rows per block and a wider small_k trigger on the dense MMVQ path`
+
+Four changes to `mmvq.cu` that only move work assignment and block geometry, so none of them
+changes a number the model computes - acceptance 0.96657 and mean length 5.68 are identical
+before and after, which is the check.
+
+The problem: at wide column counts the 2 KB activation vector `y` is re-read once per output
+row, and that re-read is 57% of the L1 load sectors at 7 columns. Four rows per block halves
+it, but needs the shared-memory carveout raised from the driver's 16.38 KB default to 64 KB
+(otherwise residency caps at 4 blocks and the win inverts, which is what an earlier attempt
+measured as +46% in a microbenchmark and -0.7% at the model) and needs
+`__launch_bounds__(.., 8)` at those column counts (otherwise 4 rows take q6_K to 158 registers
+and 6 blocks, eating the whole gain). The fourth change takes the wider `small_k` layout
+whenever K is an exact multiple of one block iteration, not only when K is shorter than one.
+
+The same rows-per-block lever applies at one column, which is the 1-column Q6_K lm_head that
+drafts all six speculative steps and is 18.4% of a pass: 4.776 -> 4.552 ms on that kernel.
+Together: 35.07 -> 36.25 -> **36.56 tok/s**. L1 load sectors fall 24% at 1 column and 38% at 7
+at unchanged occupancy, so this is a traffic win rather than a parallelism win.
+
+It regresses the n=512 shape by 3.4% (64 blocks leave no room for 4 rows) and the dense q8_0
+n=1024 shape by 3.3% at 1 column; both are a fraction of a millisecond per pass.
+
+## 4. `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME`
 
 `nsys` and `ncu` are not part of the stock image, so attributing decode time to individual nodes
 otherwise means timing them by hand. Setting `GGML_CUDA_OP_TIME` records a CUDA event pair per

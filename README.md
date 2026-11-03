@@ -1,13 +1,13 @@
 # momonga-llama.cpp
 
-A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that carries two CUDA
-changes for one board: **Jetson AGX Xavier, Volta sm_72, CUDA 11.4**. Everything outside
+A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that carries CUDA changes
+for one board: **Jetson AGX Xavier, Volta sm_72, CUDA 11.4**. Everything outside
 `ggml/src/ggml-cuda/` is upstream, unmodified.
 
 The parent project is [llama.cpp](https://github.com/ggml-org/llama.cpp); its documentation
 (backends, tools, build options for every other platform) applies here unchanged except where
 this file says otherwise. See [JETSON-XAVIER.md](JETSON-XAVIER.md) for the full reasoning behind
-the two patches.
+the patches.
 
 ## What is different
 
@@ -17,6 +17,7 @@ the two patches.
 |---|---|
 | `cuda : use MMVQ for MUL_MAT_ID on sm_72 and drop the per-type batch cap` | keeps the MoE matmul on the MMVQ kernel for batches above 4-5, where stock silently switches to MMQ and runs about 2.5x slower |
 | `cuda : run the IQ3_S MoE kernel at 64 registers instead of 79` | the launch bounds declared a 256-thread block for a one-warp kernel, so the compiler spent 79 registers and residency was capped at 37.5%; 64 registers gives 47.9% occupancy, -7.6% kernel time, +2.25% end to end |
+| `cuda : four rows per block and a wider small_k trigger on the dense MMVQ path` | the activation vector is re-read once per output row and that re-read is most of the L1 traffic at wide column counts; 4 rows per block, a 64 KB carveout, launch bounds at 8 blocks, a wider `small_k` trigger, and 4 rows at 1 column as well. Numerics-neutral. +4.3% end to end |
 | `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME` | debug only, off unless the variable is set |
 | `docs : ...` | fork-specific documentation: `JETSON-XAVIER.md`, this `README.md`, no code |
 
@@ -39,14 +40,18 @@ One model, one board, 400 generated tokens, greedy, median of 5 runs:
 |---|---|---|---|
 | stock `n-max 3` (best before the patch) | 31.50 | 0.989 | 3.69 |
 | this fork, `n-max 6`, dispatch patch only | 34.30-34.49 | 0.967 | 5.68 |
-| this fork, `n-max 6`, plus the 64-register launch bounds | **35.07** | 0.967 | 5.68 |
+| this fork, `n-max 6`, plus the 64-register launch bounds | 35.07 | 0.967 | 5.68 |
+| this fork, `n-max 6`, plus the dense MMVQ work | **36.56** | 0.967 | 5.68 |
 | stock, no speculation | 16.9 | - | - |
 
 The patch alone does nothing at batch 4, where both paths were already legal. Its value is that
 drafting deeper stops being a penalty, which is where the 9.5% comes from. The range above is the
 same build measured on two upstream bases (`2cbca38` and `dde879b`); the difference is inside
-the noise of five reps. The 35.07 row was measured as a direct A/B on `2cbca38`: the two runs
-differ only in `libggml-cuda.so.0`, and both report acceptance 0.96657 and mean length 5.68.
+the noise of five reps. The 35.07 and 36.56 rows were each measured as a direct A/B on
+`2cbca38`: the runs differ only in `libggml-cuda.so.0`, and every one of them reports
+acceptance 0.96657 and mean length 5.68. That last point is the check that none of the
+kernel changes moved a number the model computes - only when a weight file changes does
+that pair move, and then it costs 44-46%.
 
 ## Build
 
