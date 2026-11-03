@@ -103,18 +103,29 @@ static __global__ void __launch_bounds__(CUDA_CONCAT_BLOCK_SIZE)
           uint64_t   nb12,
           uint64_t   nb13,
            int64_t   ne0,
-           int64_t /*ne1*/,
-           int64_t /*ne2*/,
-           int64_t /*ne3*/,
+           int64_t   ne1,
+           int64_t   ne2,
+           int64_t   ne3,
           uint64_t   nb0,
           uint64_t   nb1,
           uint64_t   nb2,
           uint64_t   nb3) {
     static_assert(dim >= 0 && dim <= 3, "dim must be in [0, 3]");
 
-    const int64_t i3 = blockIdx.z;
-    const int64_t i2 = blockIdx.y;
-    const int64_t i1 = blockIdx.x;
+    // a block covers blockDim.y consecutive rows (i1/i2/i3 flattened), so a small ne0 does not
+    // leave most of a 256-thread block idle after ne0 threads - which is what the old
+    // one-block-per-row grid did for the GDN conv state, where ne0 is d_conv-1+n_tokens (~10)
+    // and ne1 is the channel count (8192)
+    const int64_t n_rows = ne1*ne2*ne3;
+    const int64_t irow   = (int64_t) blockIdx.x*blockDim.y + threadIdx.y;
+
+    if (irow >= n_rows) {
+        return;
+    }
+
+    const int64_t i3 = irow/(ne1*ne2);
+    const int64_t i2 = (irow - i3*ne1*ne2)/ne1;
+    const int64_t i1 = (irow - i3*ne1*ne2 - i2*ne1);
 
     const T * x;
 
@@ -163,9 +174,14 @@ static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml
     } else {
         GGML_ASSERT(!ggml_is_quantized(src0->type));
 
-        dim3 grid_dim(dst->ne[1], dst->ne[2], dst->ne[3]);
+        const int64_t n_rows = dst->ne[1]*dst->ne[2]*dst->ne[3];
+        const int64_t bx_raw = (dst->ne[0] + 31) & ~(int64_t) 31;   // one warp per row where possible
+        const int     bx     = (int) std::min<int64_t>(bx_raw, CUDA_CONCAT_BLOCK_SIZE);
+        const int     by     = CUDA_CONCAT_BLOCK_SIZE/bx;           // rows packed into one block
+        const dim3 grid_dim((unsigned) ((n_rows + by - 1)/by), 1, 1);
+        const dim3 block_dim(bx, by, 1);
         auto launch_kernel = [&](auto dim) {
-            concat_non_cont<T, dim><<<grid_dim, CUDA_CONCAT_BLOCK_SIZE, 0, stream>>>(
+            concat_non_cont<T, dim><<<grid_dim, block_dim, 0, stream>>>(
                 (const char *) src0->data, (const char *) src1->data, (char *) dst->data,
                 src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
                 src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
