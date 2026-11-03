@@ -16,6 +16,7 @@ the two patches.
 | commit | effect |
 |---|---|
 | `cuda : use MMVQ for MUL_MAT_ID on sm_72 and drop the per-type batch cap` | keeps the MoE matmul on the MMVQ kernel for batches above 4-5, where stock silently switches to MMQ and runs about 2.5x slower |
+| `cuda : run the IQ3_S MoE kernel at 64 registers instead of 79` | the launch bounds declared a 256-thread block for a one-warp kernel, so the compiler spent 79 registers and residency was capped at 37.5%; 64 registers gives 47.9% occupancy, -7.6% kernel time, +2.25% end to end |
 | `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME` | debug only, off unless the variable is set |
 | `docs : ...` | fork-specific documentation: `JETSON-XAVIER.md`, this `README.md`, no code |
 
@@ -37,13 +38,15 @@ One model, one board, 400 generated tokens, greedy, median of 5 runs:
 | configuration | tok/s | draft acceptance | mean draft length |
 |---|---|---|---|
 | stock `n-max 3` (best before the patch) | 31.50 | 0.989 | 3.69 |
-| this fork, `n-max 6` | **34.30-34.49** | 0.967 | 5.68 |
+| this fork, `n-max 6`, dispatch patch only | 34.30-34.49 | 0.967 | 5.68 |
+| this fork, `n-max 6`, plus the 64-register launch bounds | **35.07** | 0.967 | 5.68 |
 | stock, no speculation | 16.9 | - | - |
 
 The patch alone does nothing at batch 4, where both paths were already legal. Its value is that
 drafting deeper stops being a penalty, which is where the 9.5% comes from. The range above is the
 same build measured on two upstream bases (`2cbca38` and `dde879b`); the difference is inside
-the noise of five reps.
+the noise of five reps. The 35.07 row was measured as a direct A/B on `2cbca38`: the two runs
+differ only in `libggml-cuda.so.0`, and both report acceptance 0.96657 and mean length 5.68.
 
 ## Build
 
