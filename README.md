@@ -100,7 +100,7 @@ All of these default to upstream behaviour; nothing needs to be set to get the r
 
 | variable | effect |
 |---|---|
-| `GGML_CUDA_MOE_RPB` | rows per block in the MoE kernel, default 2. 4 wins in a microbenchmark but loses 0.7% at the model level; kept for reproducibility |
+| `GGML_CUDA_MOE_RPB` | rows per block in the MoE kernel, default 2. 4 rows cuts L1 sectors 32% and kernel time 4.1% standalone but is exactly neutral in situ (63.98 vs 63.95 ms per pass), because the model's MoE cost is a per-token DRAM stream that an L1 lever cannot reach; kept for reproducibility |
 | `GGML_CUDA_MMID_MAX_BATCH` | forces the `MUL_MAT_ID` batch cap; 0 forces the MMQ path for A/B |
 | `GGML_CUDA_SMALLK` | forces the wide rows-per-block layout on or off |
 | `GGML_CUDA_OP_TIME` | per-op GPU timing dump to stderr, top 16 by time, every fifth graph. Disables CUDA graphs and costs real time - use it for shares, not for tok/s |

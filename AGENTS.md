@@ -44,12 +44,18 @@ replaces them follows.
   and wins at the model level (+4.3% together with the carveout, the launch bounds and the
   wider `small_k` trigger). *Corrected:* the old note here said it loses 0.7% and that the
   default stays 2. That measurement was taken without the 64 KB carveout, which is part of the
-  change and not tuning on top of it. The MoE kernel's own `GGML_CUDA_MOE_RPB` hook is still a
-  model-level loss and still defaults to 2.
-- **The board is not bandwidth-starved**: 32-35% of a measured 110 GB/s. *Corrected:* the IQ3_S
-  expert matmul is not ALU-bound either - hardware counters put `long_scoreboard` (waiting on a
-  load) ahead of `math_pipe_throttle`. It was occupancy-limited by a launch-bounds declaration
-  that named a 256-thread block for a 32-thread kernel, and fixing that was worth +2.25%.
+  change and not tuning on top of it. The MoE kernel's own `GGML_CUDA_MOE_RPB` hook is neutral in
+  situ - 63.98 ms per pass at 2 rows against 63.95 at 4, with the grid verified changed - so it
+  still defaults to 2.
+- **The board is not bandwidth-starved**: a full speculation pass moves about 8.1 GB in 171 ms,
+  which is 47 GB/s or 43% of a measured 110 GB/s. *Corrected twice:* the earlier 32-35% figure
+  counted only the 41-layer forward and omitted the six 1-column lm_head draft calls (2.5 GB).
+  *Corrected:* the IQ3_S expert matmul is not ALU-bound either - hardware counters put
+  `long_scoreboard` (waiting on a load) ahead of `math_pipe_throttle`. It was occupancy-limited
+  by a launch-bounds declaration that named a 256-thread block for a 32-thread kernel, and fixing
+  that was worth +2.25%. In situ the MoE is now measured as a pure DRAM stream at 44-52 GB/s
+  whose cost is linear in tokens with no intercept, so its remaining headroom is memory-level
+  parallelism per warp, not occupancy and not launch geometry.
 - Measurement discipline that produced those numbers: 5 reps and a median for anything under 2%,
   never extrapolate a microbenchmark across batch sizes, report draft acceptance with every
   weight or config change, and write a negative result down with the same care as a positive one.

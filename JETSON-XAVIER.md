@@ -50,7 +50,13 @@ gives 64 registers and 47.9% occupancy. Kernel time falls 7.6% and the model goe
 35.07 tok/s (+2.25%) with acceptance unchanged at 0.96657 and mean length 5.68.
 
 32 blocks per SM is the sm_72 maximum and all four occupancy limits (blocks, registers, shared,
-warps) now sit at 32, so this kernel is finished for a one-warp block.
+warps) now sit at 32, so this kernel is finished for a one-warp block. Measured in situ
+afterwards, its cost is exactly linear in token count - 0.1392 ms per token at 7 columns for
+gate/up, 0.0818 for down, intercept ~0.006 ms - because each token routes to its own eight
+experts, so it is a DRAM stream at 44-52 GB/s with no launch overhead and nothing to reuse
+across tokens. Launch-geometry levers in this kernel (including `GGML_CUDA_MOE_RPB`) measure
+changes in L1 sectors but none in the model; the remaining headroom is memory-level parallelism
+per warp, not occupancy.
 
 ## 3. `cuda : four rows per block and a wider small_k trigger on the dense MMVQ path`
 
