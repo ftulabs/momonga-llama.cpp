@@ -611,7 +611,9 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
         switch (ncols_dst) {
             case 1:
                 if (small_k) {
-                    return nwarps;
+                    // Same argument as ncols 5-8: y is re-read once per output row. small_k already
+                    // guarantees the wider layout covers K, so doubling the rows only halves that re-read.
+                    return table_id == MMVQ_PARAMETERS_TURING ? 2*nwarps : nwarps;
                 }
                 if (table_id == MMVQ_PARAMETERS_GB10) {
                     return type == GGML_TYPE_IQ2_S || type == GGML_TYPE_IQ3_S ? 2 : 1;
