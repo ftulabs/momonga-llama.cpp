@@ -1,134 +1,124 @@
-# llama.cpp
+# momonga-llama.cpp
 
-![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
+A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that carries two CUDA
+changes for one board: **Jetson AGX Xavier, Volta sm_72, CUDA 11.4**. Everything outside
+`ggml/src/ggml-cuda/` is upstream, unmodified.
 
-<div align="center">
+The parent project is [llama.cpp](https://github.com/ggml-org/llama.cpp); its documentation
+(backends, tools, build options for every other platform) applies here unchanged except where
+this file says otherwise. See [JETSON-XAVIER.md](JETSON-XAVIER.md) for the full reasoning behind
+the two patches.
 
-<b>LLM inference in C/C++</b>
+## What is different
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp?filter=v*&color=brightgreen)](https://github.com/ggml-org/llama.cpp/releases?q=tag:v0)
-[![Nightly](https://img.shields.io/github/v/release/ggml-org/llama.cpp?label=nightly&filter=b*&color=orange)](https://github.com/ggml-org/llama.cpp/releases?q=b)
-[![Server](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/server.yml?label=Server)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
-[![Docker](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/docker.yml?label=Docker)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
-[![Winget](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/winget.yml?label=Winget)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
+    git log --oneline upstream/master..HEAD
 
-[ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md) / [maintainer PRs](https://github.com/ggml-org/llama.cpp/pulls?q=is%3Apr%20is%3Aopen%20draft%3AFalse%20(author%3Asanmai%20OR%20author%3Argerganov%20OR%20author%3AKitaitiMakoto%20OR%20author%3Adanbev%20OR%20author%3Aaldehir%20OR%20author%3Amax-krasnyansky%20OR%20author%3ACISC%20OR%20author%3Aggerganov%20OR%20author%3Aam17an%20OR%20author%3Ajhen0409%20OR%20author%3Abartowski1182%20OR%20author%3Anikwen%20OR%20author%3Ahipudding%20OR%20author%3Aravi9%20OR%20author%3AServeurpersoCom%20OR%20author%3Athelittlefireman%20OR%20author%3Apwilkin%20OR%20author%3Areeselevine%20OR%20author%3Angxson%20OR%20author%3Ajeffbolznv%20OR%20author%3Amarty1885%20OR%20author%3A0cc4m%20OR%20author%3ATitaniumtown%20OR%20author%3Aangt%20OR%20author%3AIMbackK%20OR%20author%3Aarthw%20OR%20author%3AJohannesGaessler%20OR%20author%3AORippler%20OR%20author%3Aruixiang63%20OR%20author%3Axctan%20OR%20author%3AmasterFoad%20OR%20author%3Aallozaur%20OR%20author%3AAndreas-Krebbel%20OR%20author%3Ayomaytk%20OR%20author%3Aaendk%20OR%20author%3Awine99%20OR%20author%3Agaugarg-nv%20OR%20author%3Ataronaeo%20OR%20author%3Aforforever73%20OR%20author%3Achaxu01%20OR%20author%3Alhez%20OR%20author%3AAlekseiNikiforovIBM%20OR%20author%3Anetrunnereve%20OR%20author%3Afairydreaming%20OR%20author%3Aynankani)%20sort%3Aupdated-desc) / [dev stats](https://github.com/ggml-org/llama.cpp-dev) / [lib llama API](https://github.com/ggml-org/llama.cpp/issues/9289) / [llama-server REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
+| commit | effect |
+|---|---|
+| `cuda : use MMVQ for MUL_MAT_ID on sm_72 and drop the per-type batch cap` | keeps the MoE matmul on the MMVQ kernel for batches above 4-5, where stock silently switches to MMQ and runs about 2.5x slower |
+| `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME` | debug only, off unless the variable is set |
+| `docs : ...` | fork-specific documentation: `JETSON-XAVIER.md`, this `README.md`, no code |
 
-</div>
+Why the first one is needed: `get_mmvq_mmid_max_batch()` compared the compute capability with
+equality against `GGML_CUDA_CC_VOLTA` (700). Xavier reports 720, the comparison failed, and the
+per-type cap fell through to the `pascal_older` table. Above the cap, `MUL_MAT_ID` switched to
+MMQ. That matters because speculative decoding with the model's multi-token-prediction head runs
+at batches 3-7, exactly where the cliff sat.
 
-## Quick start
+The cap could not simply be raised: the MoE kernel was compiled with `__launch_bounds__` derived
+from the cap while launching `blockDim.y = n_tokens`, so anything above the table produced
+`CUDA error: invalid argument`. The patch moves the token index to `blockIdx.z`, which makes a
+block one warp at any batch, and compares the capability as a range instead.
 
-A few options to get `llama.cpp` installed on your machine:
+## Measured result
 
-```bash
-# curl
-curl -LsSf https://llama.app/install.sh | sh
+One model, one board, 400 generated tokens, greedy, median of 5 runs:
 
-# powershell
-irm https://llama.app/install.ps1 | iex
-```
+| configuration | tok/s | draft acceptance | mean draft length |
+|---|---|---|---|
+| stock `n-max 3` (best before the patch) | 31.50 | 0.989 | 3.69 |
+| this fork, `n-max 6` | **34.30-34.49** | 0.967 | 5.68 |
+| stock, no speculation | 16.9 | - | - |
 
-- Visit https://llama.app and follow the instructions
-- Run with Docker - see our [Docker documentation](docs/docker.md)
-- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
-- Build from source by cloning this repository - check out [our build guide](docs/build.md)
+The patch alone does nothing at batch 4, where both paths were already legal. Its value is that
+drafting deeper stops being a penalty, which is where the 9.5% comes from. The range above is the
+same build measured on two upstream bases (`2cbca38` and `dde879b`); the difference is inside
+the noise of five reps.
 
-Once installed:
+## Build
+
+On the Xavier, with CUDA 11.4 and the system gcc:
 
 ```sh
-# Download and run a model directly from Hugging Face
-llama cli -hf ggml-org/Qwen3.5-0.8B-GGUF
+cmake -S . -B build-volta -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=72 \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-11.4/bin/nvcc \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10.3.0 \
+  -DCMAKE_CUDA_FLAGS="-Xcompiler=-isystem,/usr/include/c++/10.3.0,-isystem,/usr/include/c++/10.3.0/aarch64-poky-linux,-isystem,/usr/include/cuda-compat-workarounds" \
+  -DGGML_CUDA_NO_VMM=ON -DGGML_CUDA_NO_PEER_COPY=ON \
+  -DGGML_CUDA_FA=ON -DGGML_CUDA_GRAPHS=ON -DGGML_NATIVE=ON \
+  -DGGML_LTO=OFF -DLLAMA_BUILD_TESTS=OFF
 
-# Launch OpenAI-compatible API server
-llama serve -hf ggml-org/Qwen3.5-0.8B-GGUF
+cmake --build build-volta -j8 --target llama-server
 ```
 
-<table align="center">
-    <tr>
-        <td align="center" width=50%>
-            <img width="1310" height="888" alt="VLM session with `llama cli`" src="https://github.com/user-attachments/assets/88726b48-1713-48aa-a525-95a02e78afc4" />
-            <i>VLM session with <b>llama cli</b></i>
-        </td>
-        <td align="center">
-            <img width="1392" height="958" alt="Built-in web UI against `llama serve` running Qwen 3.6" src="https://github.com/user-attachments/assets/b402f972-2e32-4def-8771-8d849f08cf2e" />
-            <i>Built-in web UI against <b>llama serve</b></i>
-        </td>
-    </tr>
-<table>
+`CMAKE_CUDA_HOST_COMPILER` and the `-isystem` flags are both required on this image: nvcc as
+shipped with CUDA 11.4 rejects the system gcc and cannot find the C++ headers without them.
+`GGML_CUDA_NO_VMM` is required because Xavier is an integrated GPU without VMM support. For
+builds on anything else, use the upstream [build guide](docs/build.md) and ignore this section.
 
-## Description
+## Run
 
-The main goal of `llama.cpp` is to enable LLM (and VLM) inference with minimal setup and state-of-the-art performance on
-a wide range of hardware - locally and in the cloud.
+```sh
+env -u GGML_CUDA_DISABLE_GRAPHS \
+build-volta/bin/llama-server \
+  -m Cyber-Tiel-Coder-35B-A3B-MTP-UD-IQ4_XS.gguf \
+  -c 262144 -fa on -ngl 99 -ncmoe 0 -t 2 -tb 2 \
+  -ctk q8_0 -ctv q8_0 -ub 32 -b 32 --poll 0 --parallel 1 \
+  --spec-type draft-mtp --spec-draft-n-max 6 --spec-draft-n-min 0 \
+  --spec-draft-p-min 0.5 --spec-draft-p-split 0.1 --load-mode none
+```
 
-- Plain C/C++ implementation without any dependencies
-- Apple silicon is a first-class citizen - optimized via ARM NEON, Accelerate and Metal frameworks
-- AVX, AVX2, AVX512 and AMX support for x86 architectures
-- RVV, ZVFH, ZFH, ZICBOP and ZIHINTPAUSE support for RISC-V architectures
-- 1.5-bit, 2-bit, 3-bit, 4-bit, 5-bit, 6-bit, and 8-bit integer quantization for faster inference and reduced memory use
-- Custom CUDA kernels for running LLMs on NVIDIA GPUs (support for AMD GPUs via HIP and Moore Threads GPUs via MUSA)
-- Vulkan and SYCL backend support
-- CPU+GPU hybrid inference to partially accelerate models larger than the total VRAM capacity
+Graphs are enabled by the *absence* of `GGML_CUDA_DISABLE_GRAPHS`: the code checks for the
+variable's existence, not its value, so `GGML_CUDA_DISABLE_GRAPHS=0` still disables them.
+`-t 2 -tb 2` and the q8_0 KV types are measured optima on this board, not defaults. The values
+above are the fastest configuration found; the surrounding flag space was swept (batching,
+polling, KV types, draft depth, parallelism, load mode) and everything else measured neutral or
+worse on this board.
 
-The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-org/ggml) library.
+## Experiment hooks
 
-## Supported backends
+All of these default to upstream behaviour; nothing needs to be set to get the results above.
 
-| Backend | Target devices |
-| --- | --- |
-| [BLAS](docs/build.md#blas-build) | All |
-| [BLIS](docs/backend/BLIS.md) | All |
-| [CANN](docs/build.md#cann) | Huawei Ascend NPU |
-| [CUDA](docs/build.md#cuda) | Nvidia GPU |
-| [HIP](docs/build.md#hip) | AMD GPU |
-| [Hexagon](docs/backend/snapdragon/README.md) | Snapdragon |
-| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
-| [MUSA](docs/build.md#musa) | Moore Threads GPU |
-| [Metal](docs/build.md#metal-build) | Apple Silicon |
-| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
-| [OpenVINO [In Progress]](docs/backend/OPENVINO.md) | Intel CPUs, GPUs, and NPUs |
-| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
-| [SYCL](docs/backend/SYCL.md) | Intel GPU |
-| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
-| [Vulkan](docs/build.md#vulkan) | GPU |
-| [WebGPU](docs/build.md#webgpu) | All |
-| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
+| variable | effect |
+|---|---|
+| `GGML_CUDA_MOE_RPB` | rows per block in the MoE kernel, default 2. 4 wins in a microbenchmark but loses 0.7% at the model level; kept for reproducibility |
+| `GGML_CUDA_MMID_MAX_BATCH` | forces the `MUL_MAT_ID` batch cap; 0 forces the MMQ path for A/B |
+| `GGML_CUDA_SMALLK` | forces the wide rows-per-block layout on or off |
+| `GGML_CUDA_OP_TIME` | per-op GPU timing dump to stderr, top 16 by time, every fifth graph. Disables CUDA graphs and costs real time - use it for shares, not for tok/s |
 
-## Documentation
+## Keeping up with upstream
 
-#### Tools
+`origin` is this fork, `upstream` is `ggml-org/llama.cpp`:
 
-- [cli](tools/cli/README.md)
-- [completion](tools/completion/README.md)
-- [server](tools/server/README.md)
-- [GBNF grammars](grammars/README.md)
+```sh
+git fetch upstream
+git rebase upstream/master
+git push origin master    # fast-forward, no force needed
+```
 
-#### Development
+The rebase applies cleanly as long as upstream has not touched
+`ggml/src/ggml-cuda/mmvq.cu` or `ggml/src/ggml-cuda/ggml-cuda.cu`. **If it has, re-measure
+instead of assuming the numbers still hold** - the patches are small enough to re-apply by hand,
+but the performance claims belong to the exact code that was measured. This `README.md` is
+fork-owned and will conflict on rebase; keep this version (`git checkout --ours README.md`).
 
-- [How to build](docs/build.md)
-- [Running on Docker](docs/docker.md)
-- [Build on Android](docs/android.md)
-- [Multi-GPU usage](docs/multi-gpu.md)
-- [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
-- [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
-- [XCFramework](docs/xcframework.md)
-- [Completions](docs/completions.md)
-- [Models](docs/models.md)
-- [Release process](docs/release.md)
+These changes are not proposed upstream. They exist for one board, one model and one
+configuration, and the profiler is debug scaffolding rather than something a maintainer should
+carry.
 
-## Contributing
+## License
 
-- Contributors can open PRs
-- Collaborators will be invited based on contributions
-- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
-- Any help with managing issues, PRs and projects is very appreciated!
-- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
-
-## Acknowledgements
-
-- [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
-- [nothings/stb](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
-- [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
-- [mackron/miniaudio](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
-- [sheredom/subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+MIT, as upstream. See [LICENSE](LICENSE). The upstream project's acknowledgements for bundled
+single-header libraries apply unchanged; they are listed in the
+[upstream README](https://github.com/ggml-org/llama.cpp#acknowledgements).
