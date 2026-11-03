@@ -4881,6 +4881,102 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
+// Debug: per-op GPU time, aggregated by node name with the layer suffix stripped.
+// Needs GGML_CUDA_OP_TIME=1 and disables CUDA graphs, so use it for shares, not absolute numbers.
+static bool ggml_cuda_op_time_enabled() {
+    static const bool enabled = [] {
+        const bool e = getenv("GGML_CUDA_OP_TIME") != nullptr;
+        fprintf(stderr, "[optime] GGML_CUDA_OP_TIME %s\n", e ? "on" : "off");
+        return e;
+    }();
+    return enabled;
+}
+
+struct ggml_cuda_op_time_entry {
+    std::string key;
+    double secs = 0.0;
+    int64_t count = 0;
+};
+
+static std::vector<cudaEvent_t>             g_optime_start;
+static std::vector<cudaEvent_t>             g_optime_stop;
+static std::vector<size_t>                  g_optime_slot;
+static std::map<std::string, size_t>        g_optime_idx;
+static std::vector<ggml_cuda_op_time_entry> g_optime_entries;
+static int                                  g_optime_graphs = 0;
+
+static std::string ggml_cuda_op_time_key(const ggml_tensor * node) {
+    std::string name = node->name;
+    size_t p = name.find_last_of('-');
+    if (p != std::string::npos && p + 1 < name.size() &&
+        name.find_first_not_of("0123456789", p + 1) == std::string::npos) {
+        name.resize(p);
+    }
+    return name + "|" + ggml_op_name(node->op);
+}
+
+static void ggml_cuda_op_time_begin(ggml_backend_cuda_context * cuda_ctx, const ggml_tensor * node) {
+    const size_t k = g_optime_slot.size();
+    if (k >= g_optime_start.size()) {
+        if (k >= 16384) {
+            return;
+        }
+        cudaEvent_t a, b;
+        CUDA_CHECK(cudaEventCreate(&a));
+        CUDA_CHECK(cudaEventCreate(&b));
+        g_optime_start.push_back(a);
+        g_optime_stop.push_back(b);
+    }
+    const std::string key = ggml_cuda_op_time_key(node);
+    auto it = g_optime_idx.find(key);
+    if (it == g_optime_idx.end()) {
+        it = g_optime_idx.emplace(key, g_optime_entries.size()).first;
+        g_optime_entries.push_back({key, 0.0, 0});
+    }
+    g_optime_slot.push_back(it->second);
+    CUDA_CHECK(cudaEventRecord(g_optime_start[k], cuda_ctx->stream()));
+}
+
+static void ggml_cuda_op_time_end(ggml_backend_cuda_context * cuda_ctx, const ggml_tensor * node) {
+    GGML_UNUSED(node);
+    const size_t k = g_optime_slot.size() - 1;
+    if (k >= g_optime_start.size()) {
+        return;
+    }
+    CUDA_CHECK(cudaEventRecord(g_optime_stop[k], cuda_ctx->stream()));
+}
+
+static void ggml_cuda_op_time_flush(ggml_backend_cuda_context * cuda_ctx) {
+    if (g_optime_slot.empty()) {
+        return;
+    }
+    CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
+    double total = 0.0;
+    for (size_t k = 0; k < g_optime_slot.size(); k++) {
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, g_optime_start[k], g_optime_stop[k]));
+        ggml_cuda_op_time_entry & e = g_optime_entries[g_optime_slot[k]];
+        e.secs += ms * 1e-3;
+        e.count++;
+        total += ms * 1e-3;
+    }
+    g_optime_slot.clear();
+
+    if (++g_optime_graphs % 5 != 0) {
+        return;
+    }
+    std::vector<ggml_cuda_op_time_entry> sorted = g_optime_entries;
+    std::sort(sorted.begin(), sorted.end(), [](const auto & a, const auto & b) { return a.secs > b.secs; });
+    fprintf(stderr, "[optime] %d graphs, %.3f ms/graph summed\n", g_optime_graphs, 1e3*total/5.0);
+    for (size_t i = 0; i < sorted.size() && i < 16; i++) {
+        const auto & e = sorted[i];
+        fprintf(stderr, "[optime]   %-34s %8.3f ms/graph  %6.1f%%  %6.0f us/op  n=%lld\n",
+                      e.key.c_str(), 1e3*e.secs/5.0, 100.0*e.secs/total, 1e6*e.secs/(double)e.count,
+                      (long long)(e.count/5));
+    }
+    for (auto & e : g_optime_entries) { e.secs = 0.0; e.count = 0; }
+}
+
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
     bool graph_evaluated_or_captured = false;
 
@@ -5066,7 +5162,14 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 GGML_UNUSED(integrated);
 #endif  // NDEBUG
 
+                const bool optime = ggml_cuda_op_time_enabled();
+                if (optime) {
+                    ggml_cuda_op_time_begin(cuda_ctx, node);
+                }
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
+                if (optime) {
+                    ggml_cuda_op_time_end(cuda_ctx, node);
+                }
                 if (!ok) {
                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
                 }
@@ -5175,6 +5278,10 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     }
 #endif // USE_CUDA_GRAPH
 
+    if (ggml_cuda_op_time_enabled()) {
+        use_cuda_graph = false; // events cannot be recorded during capture
+    }
+
     if (use_cuda_graph && cuda_graph_update_required) {
         // Start CUDA graph capture
         {
@@ -5186,6 +5293,10 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     }
 
     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
+
+    if (ggml_cuda_op_time_enabled()) {
+        ggml_cuda_op_time_flush(cuda_ctx);
+    }
 
     return GGML_STATUS_SUCCESS;
 }
