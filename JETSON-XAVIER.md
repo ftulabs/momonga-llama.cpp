@@ -41,12 +41,17 @@ default stays 2.
 
 ## 2. `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME`
 
-`nsys`, `ncu` and `nvprof` are not available on this board's image, so attributing decode time to
-individual nodes otherwise means timing them by hand. Setting `GGML_CUDA_OP_TIME` records a CUDA
-event pair per node, disables graph capture, and every fifth graph prints the accumulated totals
-(top 16, aggregated by node name with the layer suffix stripped) to stderr.
+`nsys` and `ncu` are not part of the stock image, so attributing decode time to individual nodes
+otherwise means timing them by hand. Setting `GGML_CUDA_OP_TIME` records a CUDA event pair per
+node, disables graph capture, and every fifth graph prints the accumulated totals (top 16,
+aggregated by node name with the layer suffix stripped) to stderr.
 
 It costs real time and is off by default. Use it for shares, not for absolute tok/s.
+
+If `nsys`/`ncu` are installed (`nsight-systems-cli` and `nsight-compute-cli` in the
+`momonga-extra` RPM feed, headers from `cuda-cupti-dev`), prefer them: both profile
+graph-launched kernels, which this hook cannot do because it disables the graphs. CUPTI requires
+root on this board - unprivileged calls return `CUPTI_ERROR_INSUFFICIENT_PRIVILEGES`.
 
 ## Build
 
