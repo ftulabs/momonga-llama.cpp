@@ -283,10 +283,23 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type
 
 // Host function: returns the max batch size for the current arch+type at runtime.
 int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
+    // Experiment hook: 0 forces MUL_MAT_ID onto the MMQ path, -1 leaves the table alone.
+    {
+        static const int override_val = [] {
+            const char * e = getenv("GGML_CUDA_MMID_MAX_BATCH");
+            return e ? atoi(e) : -1;
+        }();
+        if (override_val >= 0) {
+            return override_val;
+        }
+    }
     // NVIDIA: P100, Volta, Ada Lovelace, and Blackwell always use MMVQ for MUL_MAT_ID.
+    // GGML_CUDA_CC_VOLTA is sm_70 (700), but cc is 100*major + 10*minor, so sm_72 (720, Xavier)
+    // is not covered by equality on VOLTA. Compare against the range instead.
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         cc = ggml_cuda_highest_compiled_arch(cc);
-        if (cc == GGML_CUDA_CC_PASCAL || cc == GGML_CUDA_CC_VOLTA || cc >= GGML_CUDA_CC_ADA_LOVELACE) {
+        if (cc == GGML_CUDA_CC_PASCAL || (cc >= GGML_CUDA_CC_VOLTA && cc < GGML_CUDA_CC_TURING) ||
+            cc >= GGML_CUDA_CC_ADA_LOVELACE) {
             return MMVQ_MAX_BATCH_SIZE;
         }
         if (cc >= GGML_CUDA_CC_TURING) {
@@ -875,10 +888,10 @@ static __global__ void mul_mat_vec_q(
 }
 
 // Dedicated MoE multi-token kernel.
-// Grid: (ceil(nrows_x / c_rows_per_block), nchannels_dst)
-// Block: (warp_size, ncols_dst) - each warp handles one token independently.
+// Grid: (ceil(nrows_x / c_rows_per_block), nchannels_dst, ncols_dst)
+// Block: (warp_size, 1) - each warp handles one token, on blockIdx.z.
 // No shared memory reduction needed since each warp works alone.
-template <ggml_type type, int c_rows_per_block, bool has_fusion = false>
+template <ggml_type type, int c_rows_per_block, bool has_fusion = false, bool tok_in_z = false>
 __launch_bounds__(get_mmvq_mmid_max_batch_for_device<type>()*ggml_cuda_get_physical_warp_size(), 1)
 static __global__ void mul_mat_vec_q_moe(
         const void * vx_ptr, const void * vy_ptr, const int32_t * ids_ptr, const ggml_cuda_mm_fusion_args_device fusion,
@@ -929,7 +942,7 @@ static __global__ void mul_mat_vec_q_moe(
         }
     }
 
-    const uint32_t token_idx   = threadIdx.y;
+    const uint32_t token_idx   = tok_in_z ? blockIdx.z : threadIdx.y;
     const int      row0        = c_rows_per_block*blockIdx.x;
     const int      blocks_per_row_x = ncols_x / qk;
     constexpr int  blocks_per_iter  = vdr * warp_size / qi;
@@ -1085,27 +1098,48 @@ static void mul_mat_vec_q_moe_launch(
         const uint32_t ncols_dst, const uint32_t ids_stride,
         const int warp_size, const int nchannels_dst, cudaStream_t stream) {
 
-    constexpr int rows_per_block = 2; // 2 gives best perf based on tuning
-    const int64_t nblocks_rows = (nrows_x + rows_per_block - 1) / rows_per_block;
-    const dim3 block_nums(nblocks_rows, nchannels_dst + (fusion.shared_up != nullptr));
-    const dim3 block_dims(warp_size, ncols_dst);
-    const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, 0, stream);
+    // Experiment hook: rows per warp in the MoE kernel, 2 is the upstream default.
+    static const int rows_per_block = [] {
+        const char * e = getenv("GGML_CUDA_MOE_RPB");
+        return e ? atoi(e) : 2;
+    }();
 
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr ||
                             fusion.x_scale != nullptr || fusion.gate_scale != nullptr;
 
-    if (has_fusion) {
-        ggml_cuda_kernel_launch(mul_mat_vec_q_moe<type, rows_per_block, true>, launch_params,
-            vx, vy, ids, fusion, dst, ncols_x, nchannels_y, nrows_x,
-            stride_row_x, stride_col_y, stride_col_dst,
-            stride_channel_x, stride_channel_y, stride_channel_dst,
-            ncols_dst, ids_stride);
-    } else {
-        ggml_cuda_kernel_launch(mul_mat_vec_q_moe<type, rows_per_block, false>, launch_params,
-            vx, vy, ids, fusion, dst, ncols_x, nchannels_y, nrows_x,
-            stride_row_x, stride_col_y, stride_col_dst,
-            stride_channel_x, stride_channel_y, stride_channel_dst,
-            ncols_dst, ids_stride);
+    // Tokens go on blockIdx.z, so a block is always one warp. That decouples the launch
+    // geometry from __launch_bounds__(get_mmvq_mmid_max_batch_for_device<type>()*warp_size),
+    // which used to make any batch above the per-type table an illegal launch. Verified
+    // bitwise identical to the previous layout at batch 4, where both were legal.
+    const uint32_t nchannels_z = nchannels_dst + (fusion.shared_up != nullptr);
+
+    const auto launch = [&](auto rpb_tag) {
+        constexpr int c_rpb = decltype(rpb_tag)::value;
+        const int64_t nblocks_rows = (nrows_x + c_rpb - 1) / c_rpb;
+        const dim3 block_nums(nblocks_rows, nchannels_z, ncols_dst);
+        const dim3 block_dims(warp_size, 1);
+        const ggml_cuda_kernel_launch_params lp = ggml_cuda_kernel_launch_params(block_nums, block_dims, 0, stream);
+
+        if (has_fusion) {
+            ggml_cuda_kernel_launch(mul_mat_vec_q_moe<type, c_rpb, true, true>, lp,
+                vx, vy, ids, fusion, dst, ncols_x, nchannels_y, nrows_x,
+                stride_row_x, stride_col_y, stride_col_dst,
+                stride_channel_x, stride_channel_y, stride_channel_dst,
+                ncols_dst, ids_stride);
+        } else {
+            ggml_cuda_kernel_launch(mul_mat_vec_q_moe<type, c_rpb, false, true>, lp,
+                vx, vy, ids, fusion, dst, ncols_x, nchannels_y, nrows_x,
+                stride_row_x, stride_col_y, stride_col_dst,
+                stride_channel_x, stride_channel_y, stride_channel_dst,
+                ncols_dst, ids_stride);
+        }
+    };
+
+    switch (rows_per_block) {
+        case 1: launch(std::integral_constant<int, 1>{}); break;
+        case 4: launch(std::integral_constant<int, 4>{}); break;
+        case 8: launch(std::integral_constant<int, 8>{}); break;
+        default: launch(std::integral_constant<int, 2>{}); break;
     }
 }
 
@@ -1141,6 +1175,17 @@ static void mul_mat_vec_q_switch_ncols_dst(
     const int     blocks_per_iter_1warp = vdr * warp_size / qi;
 
     const auto should_use_small_k = [&](int c_ncols_dst) {
+        // Experiment hook: 1 forces the wide rows_per_block layout, 0 forces it off, -1 uses
+        // the table below.
+        {
+            static const int smallk_env = [] {
+                const char * e = getenv("GGML_CUDA_SMALLK");
+                return e ? atoi(e) : -1;
+            }();
+            if (smallk_env >= 0) {
+                return smallk_env != 0;
+            }
+        }
         // When K is small, increase rows_per_block to match nwarps so each warp has more work to do
         // Trigger when the full thread block covers all K blocks in a single loop iteration and few threads remain idle.
         const int  nwarps = calc_nwarps(type, c_ncols_dst, table_id);
