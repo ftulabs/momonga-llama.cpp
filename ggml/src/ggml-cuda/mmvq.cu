@@ -620,11 +620,17 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
             case 2:
             case 3:
             case 4:
+                return 2;
             case 5:
             case 6:
             case 7:
             case 8:
-                return 2;
+                // The activation vector y is re-read once per output row, so at wide column
+                // counts it costs more L1 traffic than the weights. Four rows per block halves
+                // that re-read; it needs the shared-memory carveout raised (see
+                // mul_mat_vec_q_switch_fusion) because the cross-warp reduction buffer grows
+                // to 3.5 KB and the default 16.38 KB carveout would cap residency at 4 blocks.
+                return table_id == MMVQ_PARAMETERS_TURING ? 4 : 2;
             default:
                 return 1;
         }
@@ -632,8 +638,17 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
     return 1;
 }
 
+// rows_per_block > 1 at wide column counts needs 4 x ncols_dst accumulators live, which pushed
+// q6_K to 158 registers and cut residency to 6 blocks. Eight blocks is what the default
+// allocation produced, so ask for exactly that (128 registers at a 64-thread block) and let the
+// compiler spill the addressing temporaries instead of halving occupancy.
+static constexpr __host__ __device__ int calc_min_blocks_per_sm(int ncols_dst) {
+    return ncols_dst >= 5 ? 8 : 1;
+}
+
 template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false, bool halve_iters = false>
-__launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id(), small_k, halve_iters)*ggml_cuda_get_physical_warp_size(), 1)
+__launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id(), small_k, halve_iters)*ggml_cuda_get_physical_warp_size(),
+                  calc_min_blocks_per_sm(ncols_dst))
 static __global__ void mul_mat_vec_q(
         const void * vx_ptr, const void * vy_ptr, const int32_t * ids_ptr, const ggml_cuda_mm_fusion_args_device fusion, float * dst_ptr,
         const uint32_t ncols_x, const uint3 nchannels_y, const uint32_t stride_row_x, const uint32_t stride_col_y,
@@ -1090,6 +1105,20 @@ static void mul_mat_vec_q_switch_fusion(
 
     GGML_ASSERT(!has_fusion && "fusion only supported for ncols_dst=1");
 
+    if constexpr (c_ncols_dst >= 5) {
+        // Rows per block > 1 allocates a cross-warp reduction buffer of
+        // [nwarps-1][ncols_dst][rows_per_cuda_block][warp_size] floats, which at 7 columns and
+        // 4 rows is 3.5 KB. The driver picks a 16.38 KB carveout by default, capping residency
+        // at 4 blocks; ask for half of the 128 KB L1/shared for shared memory (64 KB) so the
+        // register limit binds instead. Done once per instantiation.
+        static const bool carveout_set = [] {
+            cudaFuncSetAttribute(mul_mat_vec_q<type, c_ncols_dst, false, small_k, halve_iters>,
+                                 cudaFuncAttributePreferredSharedMemoryCarveout, 50);
+            return true;
+        }();
+        (void) carveout_set;
+    }
+
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, nbytes_shared, stream);
     ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, false, small_k, halve_iters>, launch_params,
         vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
@@ -1197,7 +1226,13 @@ static void mul_mat_vec_q_switch_ncols_dst(
         // When K is small, increase rows_per_block to match nwarps so each warp has more work to do
         // Trigger when the full thread block covers all K blocks in a single loop iteration and few threads remain idle.
         const int  nwarps = calc_nwarps(type, c_ncols_dst, table_id);
-        bool       use    = nwarps > 1 && blocks_per_row_x < nwarps * blocks_per_iter_1warp;
+        // The wider layout is free when the block covers K in an exact number of iterations:
+        // every thread stays busy, and rows_per_block = nwarps lets the q8_1 activation loads be
+        // shared by nwarps rows instead of re-read per row. Measured on sm_72 q6_K at K=2048
+        // (the 1-column lm_head, 5.3 ms -> 4.9 ms, L1 sectors -24%).
+        const int  cover   = nwarps * blocks_per_iter_1warp;
+        bool       use     = nwarps > 1 &&
+                             (blocks_per_row_x < cover || blocks_per_row_x % cover == 0);
 
         constexpr std::array<ggml_type, 2> iq_slow_turing = {
             GGML_TYPE_IQ3_XXS,
