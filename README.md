@@ -41,7 +41,8 @@ One model, one board, 400 generated tokens, greedy, median of 5 runs:
 | stock `n-max 3` (best before the patch) | 31.50 | 0.989 | 3.69 |
 | this fork, `n-max 6`, dispatch patch only | 34.30-34.49 | 0.967 | 5.68 |
 | this fork, `n-max 6`, plus the 64-register launch bounds | 35.07 | 0.967 | 5.68 |
-| this fork, `n-max 6`, plus the dense MMVQ work | **36.56** | 0.967 | 5.68 |
+| this fork, `n-max 6`, plus the dense MMVQ work | 36.56 | 0.967 | 5.68 |
+| this fork, plus the non-contiguous `concat` geometry | **36.63** | 0.967 | 5.68 |
 | stock, no speculation | 16.9 | - | - |
 
 The patch alone does nothing at batch 4, where both paths were already legal. Its value is that

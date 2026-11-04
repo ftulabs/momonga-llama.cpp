@@ -32,11 +32,12 @@ replaces them follows.
 
 ## What has been measured (do not re-derive)
 
-- **36.56 tok/s**, 400 generated tokens, greedy, median of 5: `--spec-draft-n-max 6
-  --spec-draft-p-min 0.5 -ub 32 -b 32 -ctk q8_0 -ctv q8_0`, draft acceptance 0.96657, mean
-  draft length 5.68. The best unpatched configuration is 31.50 at `n-max 3`; plain decode with
-  no speculation is 16.9. The stack underneath: 35.07 from the MoE launch bounds, 34.30 without
-  them, and the dense MMVQ commit on top for the last 4.3%.
+- **36.63 tok/s**, 400 generated tokens, greedy, median over 18 reps in both orders:
+  `--spec-draft-n-max 6 --spec-draft-p-min 0.5 -ub 32 -b 32 -ctk q8_0 -ctv q8_0`, draft
+  acceptance 0.96657, mean draft length 5.68. The best unpatched configuration is 31.50 at
+  `n-max 3`; plain decode with no speculation is 16.9. The stack underneath: 35.07 from the MoE
+  launch bounds, 34.30 without them, the dense MMVQ commits on top for 4.3%, and the last +0.29%
+  from packing destination rows in the non-contiguous `concat` kernel (36.56 -> 36.63).
 - **The 9.5% comes from drafting deeper, not from the kernel being faster at a given batch.** The
   patch does nothing at batch 4, where both paths were already legal. It removes a cliff above
   4-5 columns that made every deeper config pay MMQ.
