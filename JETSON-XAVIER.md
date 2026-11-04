@@ -120,8 +120,8 @@ with decode measured in the same load:
 
 Decode is untouched (36.4-36.5 tok/s without `-bs`, acceptance 0.96657, mean length 5.68) because
 MMQ is not on the decode path. The gain is only 12% and not the 4x the removed work would suggest:
-the launch already reads at about 114 GB/s against this board's 110 GB/s ceiling, so the dot was
-hidden behind the memory stream.
+the launch reads at only about 57 GB/s against this board's 110 GB/s ceiling - `gate` and `up` are
+separate 115 MB launches, not one fused one - so neither the dot nor the bandwidth was saturated.
 
 ## Build
 
