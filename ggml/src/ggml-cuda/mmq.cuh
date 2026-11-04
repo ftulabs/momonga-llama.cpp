@@ -6,6 +6,7 @@
 
 #include <climits>
 #include <cstdint>
+#include <cstdlib>
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
 #define MMQ_ITER_K             256
@@ -1456,6 +1457,31 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J, /*fallback =*/ false, prec_src1, has_fusion>), nbytes_shared);
     if constexpr (!has_fusion) {
         CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J, /*fallback =*/ true, prec_src1, false>), nbytes_shared);
+    }
+
+    // Experiment hook: GGML_CUDA_MMQ_CARVEOUT=<percent> sets the preferred shared-memory carveout.
+    // One block of this kernel needs nbytes_shared, so with the driver's default the residency can
+    // cap at one 8-warp block per SM. Purely a resource hint: no arithmetic of any kind changes.
+    // Measured and it does NOT pay: 100 gave +0.4% on a 9,563-token prefill, which is inside the
+    // protocol floor, because the prefill MoE launch is already at the DRAM read ceiling and has no
+    // load latency left to hide. Kept as a switch; see findings/2026-11-04-prefill-moe-tile-width.md.
+    {
+        static const int carveout_pct = [] {
+            const char * e = getenv("GGML_CUDA_MMQ_CARVEOUT");
+            return e != nullptr ? atoi(e) : -1;
+        }();
+        if (carveout_pct >= 0) {
+            static bool carveout_set[GGML_CUDA_MAX_DEVICES] = { false };
+            if (!carveout_set[id]) {
+                CUDA_CHECK(cudaFuncSetAttribute(mul_mat_q<type, J, /*fallback =*/ false, prec_src1, has_fusion>,
+                                                cudaFuncAttributePreferredSharedMemoryCarveout, carveout_pct));
+                if constexpr (!has_fusion) {
+                    CUDA_CHECK(cudaFuncSetAttribute(mul_mat_q<type, J, /*fallback =*/ true, prec_src1, false>,
+                                                    cudaFuncAttributePreferredSharedMemoryCarveout, carveout_pct));
+                }
+                carveout_set[id] = true;
+            }
+        }
     }
 
     const int I_dst = has_fusion ? config.I/2 : config.I; // Rows of dst per tile, see mul_mat_q.

@@ -96,6 +96,33 @@ If `nsys`/`ncu` are installed (`nsight-systems-cli` and `nsight-compute-cli` in 
 graph-launched kernels, which this hook cannot do because it disables the graphs. CUPTI requires
 root on this board - unprivileged calls return `CUPTI_ERROR_INSUFFICIENT_PRIVILEGES`.
 
+## 5. `cuda : pick the MoE prefill tile width from tokens per expert`
+
+`mmq.cu` chooses the MMQ tile width `J` from `ncols_opt = ne12` for every multiplicand, but a
+`mul_mat_id` launch with 32 tokens over 256 experts and 8 routed experts gives each expert about
+**one** useful column. The kernel still computes a full `J`-column tile: `vec_dot` has no column
+bound and only the write-back honours `tile_y_max_j`, so 31 of 32 columns' worth of dp4a work is
+discarded. The code already had the right rule for RDNA3/RDNA4 - pick `J` from the average tokens
+per expert, `ceil(ne12*n_expert_used/ne02)` - and this patch applies it on NVIDIA as well.
+
+Tightening the tile is bit-preserving: `J` decides which thread owns an output element, not the
+order of its K sum, so acceptance and mean draft length come back identical. It is on by default;
+`GGML_CUDA_MMQ_MOE_TILE_AVG=0` restores the old choice and `=2` is a negative control (IQ3_S only).
+
+Measured on this board, `-ub 32 -b 32`, prompt not cached, three lengths, one server load per arm
+with decode measured in the same load:
+
+| prompt | before | after | TTFT before | TTFT after |
+|---|---|---|---|---|
+| 590 tokens | 78.8 tok/s | 87.1 | 7,491 ms | 6,776 ms |
+| 2,385 tokens | 75.8 | 84.3 | 31,468 ms | 28,307 ms |
+| 9,563 tokens | 71.0 | 79.5 | 134,638 ms | 120,231 ms |
+
+Decode is untouched (36.4-36.5 tok/s without `-bs`, acceptance 0.96657, mean length 5.68) because
+MMQ is not on the decode path. The gain is only 12% and not the 4x the removed work would suggest:
+the launch already reads at about 114 GB/s against this board's 110 GB/s ceiling, so the dot was
+hidden behind the memory stream.
+
 ## Build
 
 ```sh

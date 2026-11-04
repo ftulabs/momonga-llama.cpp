@@ -5,6 +5,42 @@
 
 #include <cstdint>
 
+// Experiment hooks (local to the fork, see findings/2026-11-04-prefill-moe-tile-width.md):
+//   GGML_CUDA_MMQ_MOE_TILE_AVG   pick the MoE tile width from the average tokens per expert
+//                                instead of the token count. Default 1 (on): at -ub 32 that reads
+//                                one token per expert, so J is 8 rather than 32. Bit-preserving,
+//                                because J chooses which thread owns an output element and not
+//                                the order of its K sum - measured TTFT 134.6 s -> 120.4 s on a
+//                                9,563-token prompt with acceptance and mean length unchanged.
+//                                0 disables it; 2 applies it to GGML_TYPE_IQ3_S only, which was
+//                                measured 1.49% slower at 9.5k and is kept only as a negative
+//                                control. See findings/2026-11-04-prefill-moe-tile-width.md.
+//   GGML_CUDA_MMQ_FORCE=1        use MMQ for every multiplicand, including wide batches where
+//                                should_use_mmq() normally hands off to cuBLAS/MMVQ.
+static int ggml_cuda_mmq_moe_tile_avg_mode() {
+    static const int mode = [] {
+        const char * e = getenv("GGML_CUDA_MMQ_MOE_TILE_AVG");
+        return e != nullptr ? atoi(e) : 1;
+    }();
+    return mode;
+}
+
+static bool ggml_cuda_mmq_moe_tile_avg(const ggml_type type) {
+    const int mode = ggml_cuda_mmq_moe_tile_avg_mode();
+    if (mode == 1) {
+        return true;
+    }
+    return mode == 2 && type == GGML_TYPE_IQ3_S;
+}
+
+static bool ggml_cuda_mmq_force() {
+    static const bool enabled = [] {
+        const char * e = getenv("GGML_CUDA_MMQ_FORCE");
+        return e != nullptr && atoi(e) != 0;
+    }();
+    return enabled;
+}
+
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream, const ggml_prec prec_src1) {
     switch (args.type_x) {
         case GGML_TYPE_Q1_0:
@@ -247,7 +283,11 @@ void ggml_cuda_mul_mat_q(
             ncols_opt = ne12;
 
             // Each expert only sees ne12*n_expert_used/ne02 tokens on average.
-            ncols_opt = (ne12*n_expert_used + ne02 - 1) / ne02;
+            // Each expert only sees ne12*n_expert_used/ne02 tokens on average.
+            // Experiment hook: GGML_CUDA_MMQ_MOE_TILE_AVG=0 restores ncols_opt = ne12.
+            if (ggml_cuda_mmq_moe_tile_avg(src0->type)) {
+                ncols_opt = (ne12*n_expert_used + ne02 - 1) / ne02;
+            }
         }
 
         J_best = ggml_cuda_mmq_get_J_best(src0->type, ncols_opt, fallback, cc, smpbo, prec_src1, &nthreads_best);
@@ -452,6 +492,10 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
 #ifdef GGML_CUDA_FORCE_MMQ
     return true;
 #endif //GGML_CUDA_FORCE_MMQ
+
+    if (ggml_cuda_mmq_force()) {
+        return true;
+    }
 
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
