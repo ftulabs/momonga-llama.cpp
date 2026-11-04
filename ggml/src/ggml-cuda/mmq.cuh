@@ -1463,8 +1463,15 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     // One block of this kernel needs nbytes_shared, so with the driver's default the residency can
     // cap at one 8-warp block per SM. Purely a resource hint: no arithmetic of any kind changes.
     // Measured and it does NOT pay: 100 gave +0.4% on a 9,563-token prefill, which is inside the
-    // protocol floor, because the prefill MoE launch is already at the DRAM read ceiling and has no
-    // load latency left to hide. Kept as a switch; see findings/2026-11-04-prefill-moe-tile-width.md.
+    // protocol floor. Corrected 2026-11-04: this comment used to say the launch was "already at the
+    // DRAM read ceiling", which was wrong - it reads 56.8 GB/s against a 92 GB/s ceiling for the
+    // same chunk geometry, and a pure-load probe puts the ceiling for its 16 resident warps at
+    // 71.8-73.3 GB/s (findings/2026-11-04-prefill-57gbs-probe.md). Residency is worth about 10
+    // GB/s per 8 warps. A Volta-specific tile was then built and measured and it does not pay
+    // either: I 128 -> 64 takes the launch from 16 to 20 resident warps and reads -0.11 / -0.03 /
+    // -0.28% at 590 / 2,385 / 9,563 tokens in both orders, because at 16 warps the kernel already
+    // saturates its own LSU path and extra warps only queue (findings/2026-11-04-prefill-mmq-tile-i64.md).
+    // At I=128 there is also no carveout that fits three blocks.
     {
         static const int carveout_pct = [] {
             const char * e = getenv("GGML_CUDA_MMQ_CARVEOUT");
