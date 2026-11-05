@@ -7,10 +7,12 @@ machine. Current record on this board: **36.63 tok/s** at `--spec-draft-n-max 6`
 `-bs` (`--backend-sampling`, a host-side +1.04%), up from 31.50 before any of it. The last kernel
 change in the ladder is the non-contiguous `concat` launch geometry (non-kernel, no numerics),
 worth +0.29%; the kernel changes below take it from 31.50 to 36.56.
-Without the MTP drafter the same build reads **18.32 tok/s plain decode** (16.37 at 8.8k of
-context) and, because `-ub` no longer touches decode, **215.0 tok/s prefill / 53.5 s TTFT at
-11,484 tokens with `-ub 3072`** - against 83.8 and 137.1 s at the MTP configuration's `-ub 32`.
-That is a separate profile, not a replacement.
+Without the MTP drafter the same build reads **24.01 tok/s plain decode** with the dense-q5k file
+(20.91 at 8.8k of context) and, because `-ub` no longer touches decode, **220.7 tok/s prefill /
+52.1 s TTFT at 11,484 tokens with `-ub 2048`** - against 83.8 and 137.1 s at the MTP
+configuration's `-ub 32`. The DFlash sidecar at depth 3 reads 23.18 on 8.8k of code. `-ub 2048`
+is the widest width that measures reproducibly; 3072 and 4096 scatter by 32-72% over identical
+loads. That is a separate profile, not a replacement.
 
     git log --oneline upstream/master..HEAD
 

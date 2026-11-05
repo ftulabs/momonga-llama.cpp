@@ -41,13 +41,18 @@ replaces them follows.
   35.07 from the MoE
   launch bounds, 34.30 without them, the dense MMVQ commits on top for 4.3%, and the last +0.29%
   from packing destination rows in the non-contiguous `concat` kernel (36.56 -> 36.63).
-- **Without the MTP drafter, `-ub` is free and prefill is 2.5x faster.** With `--spec-type none`
-  decode is 18.23-18.35 tok/s at every width from 32 to 8192, so the width only buys prefill:
-  **215.0 tok/s and 53.5 s TTFT at 11,484 tokens with `-ub 3072`**, against 83.8 and 137.1 s at
-  `-ub 32`. Plain decode is 18.32 (short) / 16.37 (8.8k); the Ornith DFlash sidecar at depth 3
-  raises that to **23.08 on 8.8k of code** for about 7% of prefill, but acceptance depends on the
-  prompt (0.787 code / 0.523 prose / 0.311 on 267 tokens). Never set a width wider than the prompt
-  (`-ub 8192` reads 95.4 tok/s at 11,484 against 214.6 at 2048).
+- **Without the MTP drafter, `-ub` is free and prefill is 2.6x faster.** With `--spec-type none`
+  decode does not move with width, so the width only buys prefill: **220.7 tok/s and 52.1 s TTFT
+  at 11,484 tokens with `-ub 2048`**, against 83.8 and 137.1 s at `-ub 32`. Plain decode is
+  **24.01 tok/s** with `Q4KM-dense-q5k.gguf` (the dense attention/GDN set retyped `q8_0 ->
+  q5_k`: +8.5% decode, +0.67% perplexity, prefill unchanged) and 20.91 at 8.8k of context; the
+  Ornith DFlash sidecar at depth 3 raises 8.8k of code to **23.18** on the plain `Q4_K_M` file
+  for about 7% of prefill, but acceptance depends on the prompt (0.889 with dense-q5k on 8.8k of
+  code / 0.787 with IQ4_XS / 0.523 prose / 0.311 on 267 tokens). Two width rules, both measured:
+  **never above 2048 for a measurement** - 3072 and 4096 read 32% and 72% spreads over identical
+  loads - and never wider than the prompt (`-ub 8192` reads 95.4 tok/s at 11,484 against 214.6 at
+  2048). Prefill is flat across the quant files (215.7-220.9 at 11,484), so only decode separates
+  them.
 - **The 9.5% comes from drafting deeper, not from the kernel being faster at a given batch.** The
   patch does nothing at batch 4, where both paths were already legal. It removes a cliff above
   4-5 columns that made every deeper config pay MMQ.
