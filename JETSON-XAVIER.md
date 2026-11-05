@@ -12,7 +12,9 @@ Without the MTP drafter the same build reads **27.86 tok/s plain decode** with t
 **215.8 tok/s prefill / 53.3 s TTFT at 11,484 tokens with `-ub 2048`** - against 83.8 and 137.1 s
 at the MTP configuration's `-ub 32`. The DFlash sidecar at depth 3 reads 23.18 on 8.8k of code. `-ub 2048`
 is the widest width that measures reproducibly; 3072 and 4096 scatter by 32-72% over identical
-loads. That is a separate profile, not a replacement.
+loads. That is a separate profile, not a replacement: re-attaching MTP to the retyped file loads
+and drafts but drops acceptance to 0.64583 (mean len 2.10), reading 23.35 tok/s against 27.86
+plain.
 
     git log --oneline upstream/master..HEAD
 

@@ -57,7 +57,9 @@ for `dense-q5k`, 22.42 for `dense-q5k-lm5`) because `q8_0`'s and `q6_k`'s dots a
 wide verify columns. The DFlash figure is context-dependent - 0.787
 acceptance on 8.8k of code with the IQ4_XS file, 0.523 on prose of the same length, 0.311 on 267
 tokens - so quote it with its prompt. `-ub 2048` is the widest width that measures reproducibly:
-3072 and 4096 scatter by 32-72% over identical loads. Neither profile replaces the other.
+3072 and 4096 scatter by 32-72% over identical loads. Neither profile replaces the other, and
+**the drafter does not come back to the retyped file**: MTP on it loads and drafts but acceptance
+falls to 0.64583 with mean len 2.10, for 23.35 tok/s against 27.86 plain.
 
 The patch alone does nothing at batch 4, where both paths were already legal. Its value is that
 drafting deeper stops being a penalty, which is where the 9.5% comes from. The range above is the

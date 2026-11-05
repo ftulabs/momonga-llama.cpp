@@ -54,7 +54,10 @@ replaces them follows.
   **never above 2048 for a measurement** - 3072 and 4096 read 32% and 72% spreads over identical
   loads - and never wider than the prompt (`-ub 8192` reads 95.4 tok/s at 11,484 against 214.6 at
   2048). Prefill is flat across the quant files (215.7-220.9 at 11,484), so only decode separates
-  them.
+  them. **MTP does not re-attach to a retyped file:** `--spec-type draft-mtp -n-max 6 -p-min 0.5`
+  on `all-q4k` loads and drafts (blk.40 is pinned back to its own types), but acceptance is
+  0.64583 with mean len 2.10, so decode is 23.35 against 27.86 plain - the requant wins and the
+  drafter are exclusive, not additive.
 - **The 9.5% comes from drafting deeper, not from the kernel being faster at a given batch.** The
   patch does nothing at batch 4, where both paths were already legal. It removes a cliff above
   4-5 columns that made every deeper config pay MMQ.
