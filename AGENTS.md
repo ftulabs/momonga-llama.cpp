@@ -46,7 +46,7 @@ replaces them follows.
   at 11,484 tokens with `-ub 2048`**, against 83.8 and 137.1 s at `-ub 32`. Plain decode is
   **27.86 tok/s** (`-bs`) with `Q4KM-all-q4k.gguf` (dense attention/GDN at `q4_k`, every expert at
   `q4_k`, shared expert `q5_k`, `output.weight` `q4_k`: four steps worth +25.2% decode for +1.67%
-  perplexity; prefill unchanged) and 20.91 at 8.8k of context before the requants; the
+  perplexity; prefill unchanged) and 23.75 at 8.8k of context; the
   Ornith DFlash sidecar at depth 3 raises 8.8k of code to **23.18** on the plain `Q4_K_M` file
   for about 7% of prefill, but acceptance depends on the prompt (0.889 with dense-q5k on 8.8k of
   code / 0.787 with IQ4_XS / 0.523 prose / 0.311 on 267 tokens). Both retyped files lose there

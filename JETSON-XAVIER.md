@@ -8,7 +8,7 @@ machine. Current record on this board: **36.63 tok/s** at `--spec-draft-n-max 6`
 change in the ladder is the non-contiguous `concat` launch geometry (non-kernel, no numerics),
 worth +0.29%; the kernel changes below take it from 31.50 to 36.56.
 Without the MTP drafter the same build reads **27.86 tok/s plain decode** with the
-`all-q4k` file (20.91 at 8.8k of context) and, because `-ub` no longer touches decode,
+`all-q4k` file (23.75 at 8.8k of context) and, because `-ub` no longer touches decode,
 **215.8 tok/s prefill / 53.3 s TTFT at 11,484 tokens with `-ub 2048`** - against 83.8 and 137.1 s
 at the MTP configuration's `-ub 32`. The DFlash sidecar at depth 3 reads 23.18 on 8.8k of code. `-ub 2048`
 is the widest width that measures reproducibly; 3072 and 4096 scatter by 32-72% over identical

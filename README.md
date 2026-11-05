@@ -44,7 +44,7 @@ One model, one board, 400 generated tokens, greedy, median of 5 runs:
 | this fork, `n-max 6`, plus the dense MMVQ work | 36.56 | 0.967 | 5.68 |
 | this fork, plus the non-contiguous `concat` geometry | 36.63 | 0.967 | 5.68 |
 | this fork, plus `-bs` (`--backend-sampling`, +1.04%) | **36.93** | 0.967 | 5.68 |
-| no speculation, all-q4k file, `-bs` | **27.86** (20.91 at 8.8k context) | - | - |
+| no speculation, all-q4k file, `-bs` | **27.86** (23.75 at 8.8k context) | - | - |
 
 **A second profile exists with the drafter dropped**, which the table above does not cover
 because it is not the same configuration: `-ub` stops moving decode and becomes a free prefill
