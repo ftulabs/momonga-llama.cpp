@@ -44,14 +44,14 @@ One model, one board, 400 generated tokens, greedy, median of 5 runs:
 | this fork, `n-max 6`, plus the dense MMVQ work | 36.56 | 0.967 | 5.68 |
 | this fork, plus the non-contiguous `concat` geometry | 36.63 | 0.967 | 5.68 |
 | this fork, plus `-bs` (`--backend-sampling`, +1.04%) | **36.93** | 0.967 | 5.68 |
-| no speculation, dense-q5k file, `-bs` | **24.27** (20.91 at 8.8k context) | - | - |
+| no speculation, dense-q5k-lm5 file, `-bs` | **24.88** (20.91 at 8.8k context) | - | - |
 
 **A second profile exists with the drafter dropped**, which the table above does not cover
 because it is not the same configuration: `-ub` stops moving decode and becomes a free prefill
-parameter. **220.7 tok/s and 52.1 s TTFT at 11,484 tokens with `-ub 2048`** against 83.8 and
-137.1 s at `-ub 32`. Decode there is **24.27 tok/s** with the dense-q5k file (24.01 without `-bs`) - `Q4_K_M` with the
-112 dense attention/GDN tensors (1.36 GB) retyped `q8_0 -> q5_k`, worth +8.5% decode for +0.67%
-perplexity and no prefill change - or **23.18 with the Ornith DFlash sidecar at depth 3 on 8.8k
+parameter. **214.3 tok/s and 53.6 s TTFT at 11,484 tokens with `-ub 2048`** against 83.8 and
+137.1 s at `-ub 32`. Decode there is **24.88 tok/s** with the `dense-q5k-lm5` file - `Q4_K_M` with the
+112 dense attention/GDN tensors (1.36 GB) retyped `q8_0 -> q5_k` (+8.5% decode, +0.67% perplexity)
+and `output.weight` retyped `q6_k -> q5_k` (+3.16% decode, +0.065% perplexity) - or **23.18 with the Ornith DFlash sidecar at depth 3 on 8.8k
 of code** (acceptance 0.889), where the plain `Q4_K_M` file beats the retyped one by 2.8% because
 `q8_0`'s dot is cheaper at wide columns. The DFlash figure is context-dependent - 0.787
 acceptance on 8.8k of code with the IQ4_XS file, 0.523 on prose of the same length, 0.311 on 267
