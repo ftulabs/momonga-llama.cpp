@@ -32,12 +32,22 @@ replaces them follows.
 
 ## What has been measured (do not re-derive)
 
-- **36.63 tok/s**, 400 generated tokens, greedy, median over 18 reps in both orders:
+- **36.63 tok/s** kernel, **36.93 with `-bs`** (`--backend-sampling`, a host-side +1.04%), 400
+  generated tokens, greedy, median over 18 reps in both orders:
   `--spec-draft-n-max 6 --spec-draft-p-min 0.5 -ub 32 -b 32 -ctk q8_0 -ctv q8_0`, draft
   acceptance 0.96657, mean draft length 5.68. The best unpatched configuration is 31.50 at
-  `n-max 3`; plain decode with no speculation is 16.9. The stack underneath: 35.07 from the MoE
+  `n-max 3`; plain decode with no speculation is **18.32** on the short prompt and **16.37** at
+  8.8k of context (the older 16.9 figure predates the dense MMVQ work). The stack underneath:
+  35.07 from the MoE
   launch bounds, 34.30 without them, the dense MMVQ commits on top for 4.3%, and the last +0.29%
   from packing destination rows in the non-contiguous `concat` kernel (36.56 -> 36.63).
+- **Without the MTP drafter, `-ub` is free and prefill is 2.5x faster.** With `--spec-type none`
+  decode is 18.23-18.35 tok/s at every width from 32 to 8192, so the width only buys prefill:
+  **215.0 tok/s and 53.5 s TTFT at 11,484 tokens with `-ub 3072`**, against 83.8 and 137.1 s at
+  `-ub 32`. Plain decode is 18.32 (short) / 16.37 (8.8k); the Ornith DFlash sidecar at depth 3
+  raises that to **23.08 on 8.8k of code** for about 7% of prefill, but acceptance depends on the
+  prompt (0.787 code / 0.523 prose / 0.311 on 267 tokens). Never set a width wider than the prompt
+  (`-ub 8192` reads 95.4 tok/s at 11,484 against 214.6 at 2048).
 - **The 9.5% comes from drafting deeper, not from the kernel being faster at a given batch.** The
   patch does nothing at batch 4, where both paths were already legal. It removes a cliff above
   4-5 columns that made every deeper config pay MMQ.

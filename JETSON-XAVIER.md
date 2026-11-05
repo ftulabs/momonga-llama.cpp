@@ -3,9 +3,14 @@
 This fork carries CUDA changes on top of `ggml-org/llama.cpp` that exist to make one model decode
 faster on one board: Jetson AGX Xavier, Volta sm_72, CUDA 11.4. They are not proposed upstream -
 they are either board-specific or debug scaffolding - and the numbers below come from a single
-machine. Current record on this board: **36.63 tok/s** at `--spec-draft-n-max 6`, up from 31.50
-before any of it. The last change in the ladder is the non-contiguous `concat` launch geometry
-(non-kernel, no numerics), worth +0.29%; the kernel changes below take it from 31.50 to 36.56.
+machine. Current record on this board: **36.63 tok/s** at `--spec-draft-n-max 6`, **36.93** with
+`-bs` (`--backend-sampling`, a host-side +1.04%), up from 31.50 before any of it. The last kernel
+change in the ladder is the non-contiguous `concat` launch geometry (non-kernel, no numerics),
+worth +0.29%; the kernel changes below take it from 31.50 to 36.56.
+Without the MTP drafter the same build reads **18.32 tok/s plain decode** (16.37 at 8.8k of
+context) and, because `-ub` no longer touches decode, **215.0 tok/s prefill / 53.5 s TTFT at
+11,484 tokens with `-ub 3072`** - against 83.8 and 137.1 s at the MTP configuration's `-ub 32`.
+That is a separate profile, not a replacement.
 
     git log --oneline upstream/master..HEAD
 

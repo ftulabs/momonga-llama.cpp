@@ -42,8 +42,17 @@ One model, one board, 400 generated tokens, greedy, median of 5 runs:
 | this fork, `n-max 6`, dispatch patch only | 34.30-34.49 | 0.967 | 5.68 |
 | this fork, `n-max 6`, plus the 64-register launch bounds | 35.07 | 0.967 | 5.68 |
 | this fork, `n-max 6`, plus the dense MMVQ work | 36.56 | 0.967 | 5.68 |
-| this fork, plus the non-contiguous `concat` geometry | **36.63** | 0.967 | 5.68 |
-| stock, no speculation | 16.9 | - | - |
+| this fork, plus the non-contiguous `concat` geometry | 36.63 | 0.967 | 5.68 |
+| this fork, plus `-bs` (`--backend-sampling`, +1.04%) | **36.93** | 0.967 | 5.68 |
+| stock, no speculation | 18.32 (16.37 at 8.8k context) | - | - |
+
+**A second profile exists with the drafter dropped**, which the table above does not cover
+because it is not the same configuration: `-ub` stops moving decode (18.23-18.35 across 32-8192)
+and becomes a free prefill parameter, **215.0 tok/s and 53.5 s TTFT at 11,484 tokens with
+`-ub 3072`** against 83.8 and 137.1 s at `-ub 32`. Decode there is 18.26 plain, or **23.08 with
+the Ornith DFlash sidecar at depth 3 on 8.8k of code** (acceptance 0.861). The DFlash figure is
+context-dependent - 0.787 acceptance on 8.8k of code, 0.523 on prose of the same length, 0.311
+on 267 tokens - so quote it with its prompt. Neither profile replaces the other.
 
 The patch alone does nothing at batch 4, where both paths were already legal. Its value is that
 drafting deeper stops being a penalty, which is where the 9.5% comes from. The range above is the
