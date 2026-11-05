@@ -44,7 +44,7 @@ replaces them follows.
 - **Without the MTP drafter, `-ub` is free and prefill is 2.6x faster.** With `--spec-type none`
   decode does not move with width, so the width only buys prefill: **220.7 tok/s and 52.1 s TTFT
   at 11,484 tokens with `-ub 2048`**, against 83.8 and 137.1 s at `-ub 32`. Plain decode is
-  **24.01 tok/s** with `Q4KM-dense-q5k.gguf` (the dense attention/GDN set retyped `q8_0 ->
+  **24.27 tok/s** (`-bs`) with `Q4KM-dense-q5k.gguf` (the dense attention/GDN set retyped `q8_0 ->
   q5_k`: +8.5% decode, +0.67% perplexity, prefill unchanged) and 20.91 at 8.8k of context; the
   Ornith DFlash sidecar at depth 3 raises 8.8k of code to **23.18** on the plain `Q4_K_M` file
   for about 7% of prefill, but acceptance depends on the prompt (0.889 with dense-q5k on 8.8k of
