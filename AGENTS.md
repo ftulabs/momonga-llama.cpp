@@ -42,12 +42,11 @@ replaces them follows.
   launch bounds, 34.30 without them, the dense MMVQ commits on top for 4.3%, and the last +0.29%
   from packing destination rows in the non-contiguous `concat` kernel (36.56 -> 36.63).
 - **Without the MTP drafter, `-ub` is free and prefill is 2.6x faster.** With `--spec-type none`
-  decode does not move with width, so the width only buys prefill: **219.2 tok/s and 52.5 s TTFT
+  decode does not move with width, so the width only buys prefill: **215.8 tok/s and 53.3 s TTFT
   at 11,484 tokens with `-ub 2048`**, against 83.8 and 137.1 s at `-ub 32`. Plain decode is
-  **26.24 tok/s** (`-bs`) with `Q4KM-dense-q4k.gguf` (the dense attention/GDN set retyped
-  `q8_0 -> q4_k` in two steps: +17.9% decode, +1.4% perplexity; `output.weight` retyped
-  `q6_k -> q5_k`: +3.16% decode, +0.065% perplexity; prefill unchanged) and 20.91 at 8.8k of
-  context before the second dense step; the
+  **27.86 tok/s** (`-bs`) with `Q4KM-all-q4k.gguf` (dense attention/GDN at `q4_k`, every expert at
+  `q4_k`, shared expert `q5_k`, `output.weight` `q4_k`: four steps worth +25.2% decode for +1.67%
+  perplexity; prefill unchanged) and 20.91 at 8.8k of context before the requants; the
   Ornith DFlash sidecar at depth 3 raises 8.8k of code to **23.18** on the plain `Q4_K_M` file
   for about 7% of prefill, but acceptance depends on the prompt (0.889 with dense-q5k on 8.8k of
   code / 0.787 with IQ4_XS / 0.523 prose / 0.311 on 267 tokens). Both retyped files lose there
