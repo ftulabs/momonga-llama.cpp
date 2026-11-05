@@ -49,7 +49,8 @@ replaces them follows.
   +3.16% decode, +0.065% perplexity; prefill unchanged) and 20.91 at 8.8k of context; the
   Ornith DFlash sidecar at depth 3 raises 8.8k of code to **23.18** on the plain `Q4_K_M` file
   for about 7% of prefill, but acceptance depends on the prompt (0.889 with dense-q5k on 8.8k of
-  code / 0.787 with IQ4_XS / 0.523 prose / 0.311 on 267 tokens). Two width rules, both measured:
+  code / 0.787 with IQ4_XS / 0.523 prose / 0.311 on 267 tokens). Both retyped files lose there
+  (22.53 dense-q5k, 22.42 dense-q5k-lm5), so the sidecar profile stays on plain `Q4_K_M`. Two width rules, both measured:
   **never above 2048 for a measurement** - 3072 and 4096 read 32% and 72% spreads over identical
   loads - and never wider than the prompt (`-ub 8192` reads 95.4 tok/s at 11,484 against 214.6 at
   2048). Prefill is flat across the quant files (215.7-220.9 at 11,484), so only decode separates

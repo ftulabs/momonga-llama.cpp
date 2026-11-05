@@ -52,8 +52,9 @@ parameter. **214.3 tok/s and 53.6 s TTFT at 11,484 tokens with `-ub 2048`** agai
 137.1 s at `-ub 32`. Decode there is **24.88 tok/s** with the `dense-q5k-lm5` file - `Q4_K_M` with the
 112 dense attention/GDN tensors (1.36 GB) retyped `q8_0 -> q5_k` (+8.5% decode, +0.67% perplexity)
 and `output.weight` retyped `q6_k -> q5_k` (+3.16% decode, +0.065% perplexity) - or **23.18 with the Ornith DFlash sidecar at depth 3 on 8.8k
-of code** (acceptance 0.889), where the plain `Q4_K_M` file beats the retyped one by 2.8% because
-`q8_0`'s dot is cheaper at wide columns. The DFlash figure is context-dependent - 0.787
+of code** (acceptance 0.889), where the plain `Q4_K_M` file beats even the retyped ones (22.53
+for `dense-q5k`, 22.42 for `dense-q5k-lm5`) because `q8_0`'s and `q6_k`'s dots are cheaper at
+wide verify columns. The DFlash figure is context-dependent - 0.787
 acceptance on 8.8k of code with the IQ4_XS file, 0.523 on prose of the same length, 0.311 on 267
 tokens - so quote it with its prompt. `-ub 2048` is the widest width that measures reproducibly:
 3072 and 4096 scatter by 32-72% over identical loads. Neither profile replaces the other.
