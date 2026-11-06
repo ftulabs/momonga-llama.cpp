@@ -15,7 +15,9 @@
 #include "llama-kv-cache-dsv4.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
+#include "llama-memory-hybrid-tg.h"
 #include "llama-memory-recurrent.h"
+#include "llama-tokengate.h"
 
 #include <cassert>
 #include <cmath>
@@ -349,6 +351,46 @@ void llm_graph_input_pos_bucket_kv::set_input(const llama_ubatch * ubatch) {
     if (pos_bucket) {
         mctx->set_input_pos_bucket(pos_bucket, ubatch);
     }
+}
+
+void llm_graph_input_tokengate::set_input(const llama_ubatch * ubatch) {
+    GGML_ASSERT(ggml_backend_buffer_is_host(qr->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(qoff->buffer));
+
+    const auto & tg = *cparams.tg_states;
+
+    float * data_qr   = (float *) qr->data;
+    float * data_qoff = (float *) qoff->data;
+    for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+        const auto * st = tg.get(ubatch->seq_id[i][0]);
+        data_qr  [i] = st ? st->get_qr(ubatch->pos[i]) : 0.0f;
+        data_qoff[i] = st ? 0.0f : 1.0f;
+    }
+
+    mctx->set_input_tg_kbias(kb, ubatch, tg);
+}
+
+const llama_kv_cache_context * llm_graph_input_tokengate::get_kv(const llama_memory_context_i * mctx, llm_graph_tg_mem mem) {
+    switch (mem) {
+        case LLM_GRAPH_TG_MEM_KV:
+            return static_cast<const llama_kv_cache_context *>(mctx);
+        case LLM_GRAPH_TG_MEM_HYBRID:
+            return static_cast<const llama_memory_hybrid_context *>(mctx)->get_attn();
+        case LLM_GRAPH_TG_MEM_HYBRID_TG:
+            {
+                const auto * hi = static_cast<const llama_memory_hybrid_tg_context *>(mctx)->get_hi();
+                return hi ? hi->get_attn() : nullptr;
+            }
+    }
+    GGML_ABORT("unknown TokenGate memory kind");
+}
+
+bool llm_graph_input_tokengate::can_reuse(const llm_graph_params & params) {
+    mctx = get_kv(params.mctx, mem);
+
+    const int64_t n_stream = params.cparams.kv_unified ? 1 : params.ubatch.n_seqs_unq;
+
+    return mctx && qr->ne[2] == params.ubatch.n_tokens && kb->ne[0] == mctx->get_n_kv() && kb->ne[3] == n_stream;
 }
 
 void llm_graph_input_out_ids::set_input(const llama_ubatch * ubatch) {
@@ -1233,6 +1275,44 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
     return res;
 }
 
+void llm_graph_input_mem_hybrid_tg::set_input(const llama_ubatch * ubatch) {
+    if (inp_lo) {
+        inp_lo->set_input(ubatch);
+    }
+    if (inp_hi) {
+        inp_hi->set_input(ubatch);
+    }
+}
+
+bool llm_graph_input_mem_hybrid_tg::can_reuse(const llm_graph_params & params) {
+    const auto * mctx = static_cast<const llama_memory_hybrid_tg_context *>(params.mctx);
+
+    this->mctx = mctx;
+
+    // each half checks its own part of the memory context
+    bool res = true;
+
+    if (inp_lo) {
+        if (!mctx->get_lo()) {
+            return false;
+        }
+        llm_graph_params params_lo = params;
+        params_lo.mctx = mctx->get_lo();
+        res &= inp_lo->can_reuse(params_lo);
+    }
+
+    if (inp_hi) {
+        if (!mctx->get_hi()) {
+            return false;
+        }
+        llm_graph_params params_hi = params;
+        params_hi.mctx = mctx->get_hi();
+        res &= inp_hi->can_reuse(params_hi);
+    }
+
+    return res;
+}
+
 // TODO: Hybrid input classes are a bit redundant.
 // Instead of creating a hybrid input, the graph can simply create 2 separate inputs.
 // Refactoring is required in the future.
@@ -1696,6 +1776,13 @@ ggml_tensor * llm_graph_context::build_lora_mm(
             continue;
         }
 
+        // TokenGate: the gate's adapter belongs to the gated sequences; plain graphs skip it, the gated decode graph
+        // masks its delta per token
+        const bool tg_lora = lora.first == cparams.tg_lora;
+        if (tg_lora && cparams.tg_phase == LLAMA_TG_PHASE_NONE) {
+            continue;
+        }
+
         const float adapter_scale = lora.second;
         const float scale = lw->get_scale(lora.first->alpha, adapter_scale);
 
@@ -1705,10 +1792,45 @@ ggml_tensor * llm_graph_context::build_lora_mm(
                 );
 
         ab_cur = ggml_scale(ctx0, ab_cur, scale);
+        if (tg_lora && cparams.tg_phase == LLAMA_TG_PHASE_DECODE) {
+            ab_cur = ggml_mul(ctx0, ab_cur, build_inp_tg_lora_mask(ab_cur->ne[1]));
+        }
         res = ggml_add(ctx0, res, ab_cur);
     }
 
     return res;
+}
+
+ggml_tensor * llm_graph_context::build_inp_tg_lora_mask(int64_t n_rows) const {
+    // the delta of every projection is [n_out, n_tokens]: one 0/1 per token
+    GGML_ASSERT(n_rows == n_tokens && "TokenGate: the gate's adapter on a cropped tensor");
+
+    if (!tg_lora_mask) {
+        auto inp = std::make_unique<llm_graph_input_tg_lora_mask>(cparams);
+
+        inp->mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, n_tokens);
+        ggml_set_input(inp->mask);
+        ggml_set_name(inp->mask, "tg_lora_mask");
+
+        tg_lora_mask = inp->mask;
+
+        res->add_input(std::move(inp));
+    }
+
+    return tg_lora_mask;
+}
+
+void llm_graph_input_tg_lora_mask::set_input(const llama_ubatch * ubatch) {
+    GGML_ASSERT(ggml_backend_buffer_is_host(mask->buffer));
+
+    float * data = (float *) mask->data;
+    for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+        data[i] = cparams.tg_states->get(ubatch->seq_id[i][0]) ? 1.0f : 0.0f;
+    }
+}
+
+bool llm_graph_input_tg_lora_mask::can_reuse(const llm_graph_params & params) {
+    return mask->ne[1] == params.ubatch.n_tokens;
 }
 
 llm_graph_amax_src1 llm_graph_context::build_amax_src1_f16(
@@ -2987,6 +3109,33 @@ ggml_tensor * llm_graph_context::build_inp_pos_bucket_dec() const {
     return cur;
 }
 
+llm_graph_input_tokengate * llm_graph_context::build_inp_tokengate(llm_graph_tg_mem mem) const {
+    GGML_ASSERT(cparams.tg_states);
+
+    // the gate bias is indexed by the KV cells of the gated layers
+    const auto * mctx_cur = llm_graph_input_tokengate::get_kv(mctx, mem);
+    GGML_ASSERT(mctx_cur);
+
+    auto inp = std::make_unique<llm_graph_input_tokengate>(cparams, mctx_cur, mem);
+
+    inp->qr = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, 1, n_tokens);
+    ggml_set_input(inp->qr);
+    ggml_set_name(inp->qr, "tg_qr");
+
+    inp->qoff = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, 1, n_tokens);
+    ggml_set_input(inp->qoff);
+    ggml_set_name(inp->qoff, "tg_qoff");
+
+    // one row per stream of the ubatch, as the KQ mask
+    const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
+
+    inp->kb = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, mctx_cur->get_n_kv(), 1, 1, n_stream);
+    ggml_set_input(inp->kb);
+    ggml_set_name(inp->kb, "tg_kb");
+
+    return (llm_graph_input_tokengate *) res->add_input(std::move(inp));
+}
+
 ggml_tensor * llm_graph_context::build_pos_bias(ggml_tensor * pos_bucket, ggml_tensor * attn_rel_b) const {
     ggml_tensor * pos_bucket_1d = ggml_reshape_1d(ctx0, pos_bucket, pos_bucket->ne[0] * pos_bucket->ne[1]);
     cb(pos_bucket_1d, "pos_bucket_1d", -1);
@@ -3280,9 +3429,9 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * sinks,
         ggml_tensor * v_mla, // TODO: remove
             float     kq_scale,
-            int       il) const {
+            int       il,
+        ggml_tensor * kq_mask_add) const {
     const llm_arch arch = model.arch;
-
     GGML_ASSERT(v_mla == nullptr);
 
     if (inp->self_k_rot[il]) {
@@ -3325,7 +3474,11 @@ ggml_tensor * llm_graph_context::build_attn(
         v = mctx_cur->get_v(ctx0, il);
     }
 
-    const auto & kq_mask = inp->self_attn_mask.raw;
+    ggml_tensor * kq_mask = inp->self_attn_mask.raw;
+    if (kq_mask_add) {
+        kq_mask = ggml_add(ctx0, kq_mask, kq_mask_add);
+        cb(kq_mask, "kq_mask_add", il);
+    }
     const auto & kv_rows = inp->self_attn_mask.rows;
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, kv_rows, sinks, v_mla, 0, kq_scale, il);
@@ -4160,6 +4313,26 @@ llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const
     auto inp = std::make_unique<llm_graph_input_mem_hybrid_k>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
 
     return (llm_graph_input_mem_hybrid_k *) res->add_input(std::move(inp));
+}
+
+llm_graph_input_mem_hybrid_tg * llm_graph_context::build_inp_mem_hybrid_tg(bool use_lo, bool use_hi) const {
+    const auto * mctx_cur = static_cast<const llama_memory_hybrid_tg_context *>(mctx);
+
+    auto build_half = [&](const llama_memory_hybrid_context * mctx_half) {
+        GGML_ASSERT(mctx_half);
+
+        auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_half->get_recr());
+        auto inp_attn = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_half->get_attn());
+
+        return std::make_unique<llm_graph_input_mem_hybrid>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_half);
+    };
+
+    auto inp = std::make_unique<llm_graph_input_mem_hybrid_tg>(
+            use_lo ? build_half(mctx_cur->get_lo()) : nullptr,
+            use_hi ? build_half(mctx_cur->get_hi()) : nullptr,
+            mctx_cur);
+
+    return (llm_graph_input_mem_hybrid_tg *) res->add_input(std::move(inp));
 }
 
 llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa() const {

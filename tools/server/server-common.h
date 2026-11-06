@@ -414,6 +414,12 @@ struct server_slot_stats {
     uint64_t n_draft_accepted    = 0;
     uint64_t n_draft_verif_steps = 0;
 
+    // TokenGate: the document tokens and the prompt tokens kept by the gate, -1 = plain prefill; the gated documents
+    // that came from the cache
+    int32_t tg_n_doc    = 0;
+    int32_t tg_n_kept   = -1;
+    int32_t tg_n_cached = 0;
+
     // these are absolute timestamps (in us)
     // note: must be signed - they are subtracted before the later ones are set
     int64_t t_start       = 0;

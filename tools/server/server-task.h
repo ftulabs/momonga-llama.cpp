@@ -89,6 +89,13 @@ struct task_params {
 
     int32_t n_cache_reuse = 0; // min chunk size to attempt reusing from the cache via KV shifting (0 = disabled)
 
+    // TokenGate (--tokengate): -1 = the server default (on for a marked document of at least --tokengate-min-span
+    // tokens), 0 = off, 1 = on; k and dilate override --tokengate-k / --tokengate-dilate when >= 0 (k > 0)
+    int32_t tokengate        = -1;
+    int32_t tokengate_k      =  0;
+    int32_t tokengate_dilate = -1;
+    int32_t tokengate_fa     = -1; // -1 = --tokengate-fa, 0/1 = exact / flash-attention approximation
+
     int64_t t_max_prompt_ms  = -1; // TODO: implement
     int64_t t_max_predict_ms = -1; // if positive, limit the generation phase to this time limit
 

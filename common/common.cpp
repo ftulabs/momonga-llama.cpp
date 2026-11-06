@@ -914,6 +914,12 @@ std::string wstring_to_utf8(const std::wstring & str) {
 }
 #endif
 
+// returns the path as a UTF-8 string, preserving its separators
+std::string fs_path_to_utf8(const std::filesystem::path & path) {
+    const auto value = path.u8string();
+    return std::string(value.begin(), value.end());
+}
+
 void fs_write_atomic(const std::filesystem::path & path, const std::string & data) {
     // a random suffix gives every writer its own temporary file, across processes and containers
     std::random_device rd;
@@ -1754,6 +1760,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
     cparams.kv_unified        = params.kv_unified;
+    cparams.tokengate         = params.tokengate;
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;

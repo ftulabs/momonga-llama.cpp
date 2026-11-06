@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-tokengate.h"
 
 #include <cstdint>
 #include <vector>
@@ -72,4 +73,19 @@ struct llama_cparams {
     void * cb_eval_user_data;
 
     llama_context * ctx_other;
+
+    // TokenGate: the memory is split at the gate layer (llama_memory_hybrid_tg) and the phase picks the half to run
+    bool           tokengate = false;
+    llama_tg_phase tg_phase  = LLAMA_TG_PHASE_NONE;
+
+    // the gated layers take flash attention with the head-mean of the per-head key bias folded into the mask
+    // (approximate) instead of the exact per-head bias without flash attention
+    bool           tg_fa_mean = false;
+
+    // the gate's paired adapter: applied to the tokens of gated sequences only (see build_lora_mm)
+    const llama_adapter_lora * tg_lora = nullptr;
+
+    // the softmax form of the gated layers per sequence, owned by the llama_context (read by the TG_TOP graphs and
+    // the TOP and DECODE phases)
+    const llama_tg_states * tg_states = nullptr;
 };

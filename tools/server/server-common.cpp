@@ -158,6 +158,12 @@ json server_slot_stats::to_json() const {
         base["draft_n_accepted"] = n_draft_accepted;
     }
 
+    if (tg_n_kept >= 0) {
+        base["tokengate_doc_n"]       = tg_n_doc;
+        base["tokengate_kept_n"]      = tg_n_kept;
+        base["tokengate_docs_cached"] = tg_n_cached;
+    }
+
     return base;
 }
 

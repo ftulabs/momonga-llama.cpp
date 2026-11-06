@@ -423,7 +423,7 @@ bool llama_batch_allocr::init(
             if (p0 >= 0) {
                 bool ok = true;
 
-                if (seq_pos_min(s) != p0 + 1) {
+                if (batch_inp.pos_gaps ? seq_pos_min(s) <= p0 : seq_pos_min(s) != p0 + 1) {
                     ok = false;
                 }
 
@@ -439,7 +439,7 @@ bool llama_batch_allocr::init(
                 }
             }
 
-            if (seq_pos_max(s) - seq_pos_min(s) + 1 > (int) seq_pos[s].size()) {
+            if (!batch_inp.pos_gaps && seq_pos_max(s) - seq_pos_min(s) + 1 > (int) seq_pos[s].size()) {
                 LLAMA_LOG_ERROR("%s: sequence %d positions are not continuous\n", __func__, s);
                 return false;
             }
@@ -1193,7 +1193,8 @@ llama_batch_ext::llama_batch_ext(llama_context * ctx) :
         n_seq_max(llama_n_seq_max(ctx)),
         mem(llama_get_memory(ctx)),
         n_vocab(llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)))),
-        n_pos_per_embd(llama_get_model(ctx)->hparams.n_pos_per_embd()) {
+        n_pos_per_embd(llama_get_model(ctx)->hparams.n_pos_per_embd()),
+        pos_gaps(ctx->get_cparams().ctx_type == LLAMA_CONTEXT_TYPE_TG_TOP) {
     clear();
 }
 

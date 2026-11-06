@@ -89,6 +89,13 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const common_batch & batch);
 
+// TokenGate: the target prefilled the positions [pos0, pos1) of `prompt` (the prompt of seq_id from position 0) with
+// llama_tokengate_prefill() or llama_tokengate_prefill_doc() instead of decoding them (so no process() call saw them);
+// rebuild the draft state of those positions from the kept tokens. false if an implementation cannot follow a
+// pruned prompt (speculative decoding should then be skipped for the sequence)
+bool common_speculative_tokengate_prefill(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt,
+        int32_t pos0, int32_t pos1);
+
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 

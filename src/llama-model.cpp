@@ -16,6 +16,7 @@
 #include "llama-kv-cache-dsv4.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
+#include "llama-memory-hybrid-tg.h"
 #include "llama-memory-hybrid-idx.h"
 #include "llama-memory-recurrent.h"
 
@@ -3332,7 +3333,58 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         }
                     }
 
-                    if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+                    // TokenGate: each half of the split model caches only its own layers; a bottom half without
+                    // attention layers (a gate on a recurrent layer below the first full-attention one) gets recurrent
+                    // memory alone, which its graph expects (see qwen35moe.cpp)
+                    const bool tg_bottom = params.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM;
+                    const bool tg_split  = tg_bottom || params.ctx_type == LLAMA_CONTEXT_TYPE_TG_TOP;
+                    bool tg_rs_only = false;
+                    if (tg_split) {
+                        GGML_ASSERT(hparams.tg_gate_layer >= 0);
+                        auto in_half = [this, tg_bottom](uint32_t il) {
+                            return il < hparams.n_layer() &&
+                                (tg_bottom ? (int32_t) il <= hparams.tg_gate_layer : (int32_t) il > hparams.tg_gate_layer);
+                        };
+                        filter_attn = [this, in_half](uint32_t il) { return in_half(il) && !hparams.is_recr(il); };
+                        filter_recr = [this, in_half](uint32_t il) { return in_half(il) &&  hparams.is_recr(il); };
+                        tg_rs_only = tg_bottom;
+                        for (int32_t il = 0; il <= hparams.tg_gate_layer; ++il) {
+                            tg_rs_only = tg_rs_only && hparams.is_recr(il);
+                        }
+                    }
+
+                    if (cparams.tokengate && params.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT) {
+                        // TokenGate in a single context: the memory split at the gate layer (llama_context checked
+                        // the model and the parameters)
+                        GGML_ASSERT(hparams.tg_gate_layer >= 0 && hparams.swa_type == LLAMA_SWA_TYPE_NONE);
+                        res = new llama_memory_hybrid_tg(
+                            /* model             */ *this,
+                            /* no_alloc          */ params.no_alloc,
+                            /* attn_type_k       */ params.type_k,
+                            /* attn_type_v       */ params.type_v,
+                            /* attn_v_trans      */ !cparams.flash_attn,
+                            /* attn_kv_size      */ cparams.n_ctx_seq,
+                            /* recurrent_type_r  */ GGML_TYPE_F32,
+                            /* recurrent_type_s  */ GGML_TYPE_F32,
+                            /* recurrent_rs_size */ std::max((uint32_t) 1, cparams.n_seq_max),
+                            /* n_seq_max         */ cparams.n_seq_max,
+                            /* n_rs_seq          */ cparams.n_rs_seq,
+                            /* offload           */ cparams.offload_kqv,
+                            /* unified           */ cparams.kv_unified,
+                            /* filter_attn       */ filter_attn,
+                            /* filter_recr       */ filter_recr);
+                    } else if (tg_rs_only) {
+                        res = new llama_memory_recurrent(
+                                *this,
+                                params.no_alloc,
+                                GGML_TYPE_F32,
+                                GGML_TYPE_F32,
+                                cparams.offload_kqv,
+                                std::max((uint32_t) 1, cparams.n_seq_max),
+                                cparams.n_seq_max,
+                                cparams.n_rs_seq,
+                                filter_recr);
+                    } else if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         // Use hybrid-iswa for hybrid models with SWA
                         res = new llama_memory_hybrid_iswa(
                             /* model             */ *this,
@@ -3416,6 +3468,13 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         } else {
                             filter = [&](uint32_t il) { return il <  hparams.n_layer(); };
                         }
+                    }
+
+                    // TokenGate: each half of the split model caches only its own layers
+                    if (params.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM) {
+                        filter = [&](uint32_t il) { return (int32_t) il <= hparams.tg_gate_layer; };
+                    } else if (params.ctx_type == LLAMA_CONTEXT_TYPE_TG_TOP) {
+                        filter = [&](uint32_t il) { return (int32_t) il >  hparams.tg_gate_layer; };
                     }
 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
@@ -3584,6 +3643,10 @@ int32_t llama_model_n_layer(const llama_model * model) {
 
 int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
+}
+
+int32_t llama_model_tokengate_layer(const llama_model * model) {
+    return model->hparams.tg_gate_layer;
 }
 
 int32_t llama_model_dflash_selector_top_k(const llama_model * model) {

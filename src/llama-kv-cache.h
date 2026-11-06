@@ -12,6 +12,7 @@ struct llama_cparams;
 struct llama_hparams;
 struct llama_model;
 struct llama_context;
+struct llama_tg_states;
 
 //
 // llama_kv_cache
@@ -246,6 +247,7 @@ public:
 
     void set_input_attn_mask (const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    void set_input_tg_kbias  (ggml_tensor * dst, const llama_ubatch * ubatch, const llama_tg_states & tg) const;
 
     // true if llama_kv_cell_ext holds information that has to survive a state save/restore
     bool has_cell_ext() const;
@@ -258,7 +260,12 @@ public:
     // note: used by n-gram input embeddings
     void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
+    // [EXPERIMENTAL] TokenGate scoring pass: mask the keys more than n positions back (0 = off), the mask only (the
+    // cells are kept); set by llama_memory_hybrid_tg::set_phase for the BOTTOM phase
+    void set_mask_window(uint32_t n) { mask_window = n; }
+
 private:
+    uint32_t mask_window = 0;
     const llama_model & model;
     const llama_hparams & hparams;
 
@@ -444,6 +451,7 @@ public:
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_attn_mask (const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    void set_input_tg_kbias  (ggml_tensor * dst, const llama_ubatch * ubatch, const llama_tg_states & tg) const;
 
     // see llama_kv_cache::get_prev_tokens()
     void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;

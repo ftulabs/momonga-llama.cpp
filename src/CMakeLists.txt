@@ -31,6 +31,8 @@ set(LLAMA_CORE_SOURCES
     llama-moe-cache.cpp
     llama-memory-hybrid.cpp
     llama-memory-hybrid-iswa.cpp
+    llama-memory-hybrid-tg.cpp
+    llama-tokengate.cpp
     llama-memory-hybrid-idx.cpp
     llama-memory-recurrent.cpp
     llama-mmap.cpp

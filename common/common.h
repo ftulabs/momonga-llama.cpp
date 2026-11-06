@@ -644,6 +644,20 @@ struct common_params {
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
     bool    cache_ram_explicit  = false; // set by --cache-ram, decision models disable the cache otherwise
 
+    // TokenGate (arXiv 2610.26754): prefill the document span of long prompts through the model's gate, keeping
+    // its best tokens only (needs a model with a gate and a single slot)
+    bool    tokengate           = false;
+    int32_t tokengate_k         = 2000;  // document tokens to keep
+    int32_t tokengate_dilate    = 0;     // +-w neighbours around each kept anchor (the reference's dilation)
+    int32_t tokengate_min_span  = 3072;  // shorter documents are prefilled whole
+    int32_t tokengate_lora      = -1;    // index in lora_adapters of the gate's paired adapter, -1 = none
+    bool    tokengate_fa        = false; // gated layers with flash attention and the head-mean key bias (approximate)
+    // the document is the text between the first opening marker and the last matching closing marker
+    std::vector<std::pair<std::string, std::string>> tokengate_markers = {
+        { "<context>",  "</context>"  }, // Open WebUI RAG template
+        { "<document>", "</document>" },
+    };
+
     // llama-connect params
     bool        server_connect      = false;
     std::string server_connect_code = "";
@@ -908,6 +922,9 @@ bool glob_match(const std::string & pattern, const std::string & str);
 #ifdef _WIN32
 std::string wstring_to_utf8(const std::wstring & str);
 #endif
+
+// returns the path as a UTF-8 string, preserving its separators
+std::string fs_path_to_utf8(const std::filesystem::path & path);
 
 //
 // Environment utils

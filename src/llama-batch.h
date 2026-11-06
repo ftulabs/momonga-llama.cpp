@@ -106,6 +106,9 @@ struct llama_batch_ext {
     const llama_token n_vocab;     // max token ID that we accept
     const size_t n_pos_per_embd;
 
+    // positions of a sequence may jump forward (TokenGate TG_TOP: pruned tokens leave gaps)
+    bool pos_gaps = false;
+
     // actual embd row width of this batch, set by the first set_token_embd()
     // must be either n_embd_inp or n_embd_inp_enc; encode/decode verify it against the graph input
     size_t n_embd = 0;

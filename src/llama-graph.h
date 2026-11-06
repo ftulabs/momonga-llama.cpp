@@ -37,6 +37,7 @@ class llama_kv_cache_iswa_context;
 class llama_memory_recurrent_context;
 class llama_memory_hybrid_context;
 class llama_memory_hybrid_iswa_context;
+class llama_memory_hybrid_tg_context;
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -247,6 +248,42 @@ public:
     const llama_hparams hparams;
 
     const llama_kv_cache_context * mctx;
+};
+
+// TokenGate: the memory that holds the KV cells of the gated layers
+enum llm_graph_tg_mem {
+    LLM_GRAPH_TG_MEM_KV,        // a KV cache (TG_TOP context of an attention-only model)
+    LLM_GRAPH_TG_MEM_HYBRID,    // the attention part of a hybrid memory (TG_TOP context of a hybrid model)
+    LLM_GRAPH_TG_MEM_HYBRID_TG, // the attention part of the upper half of a llama_memory_hybrid_tg
+};
+
+// TokenGate: per-query scaled-softmax ratio and per-key gate bias of the gated layers
+class llm_graph_input_tokengate : public llm_graph_input_i {
+public:
+    llm_graph_input_tokengate(
+            const llama_cparams & cparams,
+            const llama_kv_cache_context * mctx,
+            llm_graph_tg_mem mem) : cparams(cparams), mctx(mctx), mem(mem) {}
+    virtual ~llm_graph_input_tokengate() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    // the KV context of the gated layers in a memory context of the given kind
+    static const llama_kv_cache_context * get_kv(const llama_memory_context_i * mctx, llm_graph_tg_mem mem);
+
+    // the query factor of a gated layer is qr * qscale_h + qoff: qr = ratio, qoff = 0 for a token of a gated
+    // sequence; qr = 0, qoff = 1 for the others (plain sequences in the same ubatch)
+    ggml_tensor * qr   = nullptr; // F32 [1, 1, n_tokens]
+    ggml_tensor * qoff = nullptr; // F32 [1, 1, n_tokens]
+    ggml_tensor * kb   = nullptr; // F32 [n_kv, 1, 1, n_stream]
+
+    const llama_cparams cparams;
+
+    const llama_kv_cache_context * mctx;
+
+    const llm_graph_tg_mem mem;
 };
 
 class llm_graph_input_out_ids : public llm_graph_input_i {
@@ -730,6 +767,43 @@ public:
     const llama_cparams cparams;
 
     const llama_memory_hybrid_context * mctx;
+};
+
+// TokenGate: 1 for the tokens of gated sequences, 0 for the others (the delta of the gate's adapter)
+class llm_graph_input_tg_lora_mask : public llm_graph_input_i {
+public:
+    llm_graph_input_tg_lora_mask(const llama_cparams & cparams) : cparams(cparams) {}
+    virtual ~llm_graph_input_tg_lora_mask() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * mask = nullptr; // F32 [1, n_tokens]
+
+    const llama_cparams cparams;
+};
+
+// TokenGate: the inputs of the two halves of a llama_memory_hybrid_tg, those the phase runs
+class llm_graph_input_mem_hybrid_tg : public llm_graph_input_i {
+public:
+    llm_graph_input_mem_hybrid_tg(
+            std::unique_ptr<llm_graph_input_mem_hybrid> inp_lo,
+            std::unique_ptr<llm_graph_input_mem_hybrid> inp_hi,
+            const llama_memory_hybrid_tg_context *      mctx) :
+        inp_lo(std::move(inp_lo)),
+        inp_hi(std::move(inp_hi)),
+        mctx(mctx) { }
+    virtual ~llm_graph_input_mem_hybrid_tg() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    std::unique_ptr<llm_graph_input_mem_hybrid> inp_lo; // layers [0, L], nullptr in the TOP phase
+    std::unique_ptr<llm_graph_input_mem_hybrid> inp_hi; // layers above L, nullptr in the BOTTOM phase
+
+    const llama_memory_hybrid_tg_context * mctx;
 };
 
 class llm_graph_input_mem_hybrid_iswa : public llm_graph_input_i {
@@ -1263,6 +1337,11 @@ struct llm_graph_context {
     ggml_tensor * build_inp_cross_embd() const;
     ggml_tensor * build_inp_pos_bucket_enc() const;
     ggml_tensor * build_inp_pos_bucket_dec() const;
+    llm_graph_input_tokengate * build_inp_tokengate(llm_graph_tg_mem mem = LLM_GRAPH_TG_MEM_KV) const;
+
+    // TokenGate: the per-token mask of the gate's adapter delta, created by the first projection that needs it
+    ggml_tensor * build_inp_tg_lora_mask(int64_t n_rows) const;
+    mutable ggml_tensor * tg_lora_mask = nullptr;
     ggml_tensor * build_pos_bias(ggml_tensor * pos_bucket, ggml_tensor * attn_rel_b) const;
 
     //
@@ -1312,7 +1391,8 @@ struct llm_graph_context {
             ggml_tensor * sinks, // [n_head_q]
             ggml_tensor * v_mla, // [n_embd_head_v_mla, n_embd_head_v, n_head_v] // TODO: remove
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor * kq_mask_add = nullptr) const;
 
     llm_graph_input_attn_k  * build_attn_inp_k() const;
 
@@ -1470,6 +1550,9 @@ struct llm_graph_context {
 
     llm_graph_input_mem_hybrid * build_inp_mem_hybrid() const;
     llm_graph_input_mem_hybrid_k * build_inp_mem_hybrid_k() const;
+
+    // TokenGate: the inputs of the halves of a llama_memory_hybrid_tg that the graph runs
+    llm_graph_input_mem_hybrid_tg * build_inp_mem_hybrid_tg(bool use_lo, bool use_hi) const;
 
     llm_graph_input_mem_hybrid_iswa * build_inp_mem_hybrid_iswa() const;
 

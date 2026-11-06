@@ -679,6 +679,13 @@ struct llama_layer {
 
     struct llama_layer_nextn nextn;
 
+    // TokenGate: scoring branch (gate layer only) and the per-head softmax form of the gated layers
+    struct ggml_tensor * tg_gate   = nullptr; // [n_embd, n_ff_gate]
+    struct ggml_tensor * tg_up     = nullptr; // [n_embd, n_ff_gate]
+    struct ggml_tensor * tg_down   = nullptr; // [n_ff_gate, 1] absorbed readout
+    struct ggml_tensor * tg_qscale = nullptr; // [1, n_head]    query temperature gamma
+    struct ggml_tensor * tg_kbias  = nullptr; // [1, 1, n_head] key bias coefficient
+
     struct llama_layer_switch_lora switch_lora;
 };
 

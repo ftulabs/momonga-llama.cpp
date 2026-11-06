@@ -6,6 +6,12 @@ void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
 
+    uint32_t tg_layer = UINT32_MAX;
+    if (ml.get_key(LLM_KV_TOKENGATE_GATE_LAYER, tg_layer, false)) {
+        hparams.tg_gate_layer = (int32_t) tg_layer;
+        ml.get_key(LLM_KV_TOKENGATE_BNORM_WEIGHT, hparams.tg_bnorm_w, false);
+    }
+
     ml.get_key_or_arr(LLM_KV_ROPE_DIMENSION_SECTIONS,    hparams.rope_sections, 4, true);
 
     // Load linear attention (gated delta net) parameters
@@ -101,6 +107,25 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
         layer.ffn_gate_shexp     = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP,     "weight", il), { n_embd, n_ff_shexp }, flags);
         layer.ffn_up_shexp       = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,       "weight", il), { n_embd, n_ff_shexp }, flags);
         layer.ffn_down_shexp     = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP,     "weight", il), { n_ff_shexp, n_embd }, flags);
+
+        // TokenGate: the scoring branch of the gate layer (a clone of its shared expert, possibly widened with
+        // routed experts, so its width comes from the file) and the softmax form of the full-attention layers
+        // above it; the recurrent layers above the gate get no bias
+        const int32_t tg_layer = hparams.tg_gate_layer;
+        if (tg_layer >= 0 && il == tg_layer) {
+            const ggml_tensor * meta = ml.get_tensor_meta(tn(LLM_TENSOR_TG_GATE, "weight", il).str().c_str());
+            if (!meta) {
+                throw std::runtime_error("TokenGate gate layer " + std::to_string(il) + " has no tg_gate.weight");
+            }
+            const int64_t n_ff_tg = meta->ne[1];
+            layer.tg_gate = create_tensor(tn(LLM_TENSOR_TG_GATE, "weight", il), { n_embd, n_ff_tg }, flags);
+            layer.tg_up   = create_tensor(tn(LLM_TENSOR_TG_UP,   "weight", il), { n_embd, n_ff_tg }, flags);
+            layer.tg_down = create_tensor(tn(LLM_TENSOR_TG_DOWN, il),           { n_ff_tg, 1 },    flags); // f32: it ranks the tokens
+        }
+        if (tg_layer >= 0 && il > tg_layer && !hparams.is_recr(il)) {
+            layer.tg_qscale = create_tensor(tn(LLM_TENSOR_TG_QSCALE, il), { 1, n_head },    flags);
+            layer.tg_kbias  = create_tensor(tn(LLM_TENSOR_TG_KBIAS,  il), { 1, 1, n_head }, flags);
+        }
     };
 
     auto load_block_mtp = [&](int il) {
@@ -162,18 +187,78 @@ llama_model_qwen35moe::graph::graph(const llm_graph_params & params) :
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
+    // TokenGate (arXiv 2610.26754), split at the gate layer L as in qwen3.cpp:
+    //   bottom: layers [0, L] up to the attention residual a_j of L (the residual after its mixer, linear or full),
+    //           outputs [a_j | gate score] for every token; recurrent layers keep the whole prompt's state
+    //   top:    the MoE half of L and the layers above it over the kept tokens only; the full-attention layers
+    //           take the gated softmax, the recurrent layers build their state from the kept tokens alone
+    // either as two contexts (TG_BOTTOM / TG_TOP) or as phases of one context with the memory split at L
+    // (llama_memory_hybrid_tg), whose DECODE phase runs new tokens through both halves at once
+    const int32_t tg_layer  = hparams.tg_gate_layer;
+    const bool    tg_mem    = cparams.tokengate;
+    const bool    tg_bottom = cparams.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM || (tg_mem && cparams.tg_phase == LLAMA_TG_PHASE_BOTTOM);
+    const bool    tg_top    = cparams.ctx_type == LLAMA_CONTEXT_TYPE_TG_TOP    || (tg_mem && cparams.tg_phase == LLAMA_TG_PHASE_TOP);
+    const bool    tg_decode = tg_mem && cparams.tg_phase == LLAMA_TG_PHASE_DECODE;
+    GGML_ASSERT(!(tg_bottom || tg_top || tg_mem) || tg_layer >= 0);
+
+    const int il_begin = tg_top    ? tg_layer     : 0;
+    const int il_end   = tg_bottom ? tg_layer + 1 : n_layer;
+
     inpL = build_inp_embd(model.tok_embd);
 
     cb(inpL, "model.input_embed", -1);
 
-    auto * inp = build_inp_mem_hybrid();
+    // a bottom half without attention layers has recurrent memory only (llama_model::create_memory), and no use
+    // for positions: an input no node reads gets no buffer, so it must not be created at all
+    const bool tg_rs_only = !tg_mem && tg_bottom && !llama_model_qwen35moe::tg_bottom_has_attn(hparams);
 
-    ggml_tensor * inp_pos     = build_inp_pos();
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    llm_graph_input_mem_hybrid * inp_lo = nullptr; // the memory of the layers [0, L] (of every layer without tg_mem)
+    llm_graph_input_mem_hybrid * inp_hi = nullptr; // the memory of the layers above L
+    llm_graph_input_rs         * inp_rs = nullptr; // tg_rs_only
+    if (tg_mem) {
+        auto * inp_tg_mem = build_inp_mem_hybrid_tg(/* use_lo */ !tg_top, /* use_hi */ !tg_bottom);
+        inp_lo = inp_tg_mem->inp_lo.get();
+        inp_hi = inp_tg_mem->inp_hi.get();
+    } else if (tg_rs_only) {
+        inp_rs = build_rs_inp();
+    } else {
+        inp_lo = build_inp_mem_hybrid();
+        inp_hi = inp_lo;
+    }
+
+    // the BOTTOM phase reads the rows of every token straight from the graph (llama_context::decode), and an input
+    // no node reads gets no buffer
+    ggml_tensor * inp_pos     = tg_rs_only ? nullptr : build_inp_pos();
+    ggml_tensor * inp_out_ids = tg_mem && tg_bottom ? nullptr : build_inp_out_ids();
+
+    ggml_tensor * tg_qr      = nullptr; // [1, 1, n_tokens]            scaled-softmax ratio of each query
+    ggml_tensor * tg_qoff    = nullptr; // [1, 1, n_tokens]            1 for the tokens of plain sequences
+    ggml_tensor * tg_kb      = nullptr; // [n_kv, 1, n_head, n_stream] gate bias of each key
+    ggml_tensor * tg_kb_keys = nullptr; // [n_kv, 1, 1, n_stream]      the same, once per key
+    if (tg_top || tg_decode) {
+        auto * inp_tg = build_inp_tokengate(tg_mem ? LLM_GRAPH_TG_MEM_HYBRID_TG : LLM_GRAPH_TG_MEM_HYBRID);
+        tg_qr   = inp_tg->qr;
+        tg_qoff = inp_tg->qoff;
+        if (cparams.tg_fa_mean) {
+            tg_kb_keys = inp_tg->kb;
+        } else {
+            tg_kb = ggml_repeat_4d(ctx0, inp_tg->kb, inp_tg->kb->ne[0], 1, n_head, inp_tg->kb->ne[3]);
+        }
+    }
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_begin; il < il_end; ++il) {
         res->t_layer_inp[il] = inpL;
+
+        // the layers above the gate read the upper memory and, after a prefill, take the gated softmax
+        const bool tg_gated = (int32_t) il > tg_layer && tg_layer >= 0;
+        llm_graph_input_mem_hybrid * inp = tg_gated ? inp_hi : inp_lo;
+
+        // TokenGate top half: the mixer of the gate layer ran in the bottom half, a_j comes in as the embedding
+        if (tg_top && il == tg_layer) {
+            inpL = build_tg_ffn(inpL, il);
+            continue;
+        }
 
         ggml_tensor * inpSA = inpL;
 
@@ -185,13 +270,16 @@ llama_model_qwen35moe::graph::graph(const llm_graph_params & params) :
         // Determine layer type and build appropriate attention mechanism
         if (hparams.is_recr(il)) {
             // Linear attention layer (gated delta net)
-            cur = build_layer_attn_linear(inp->get_recr(), cur, il);
+            cur = build_layer_attn_linear(inp ? inp->get_recr() : inp_rs, cur, il);
         } else {
             // Full attention layer
-            cur = build_layer_attn(inp->get_attn(), cur, inp_pos, il);
+            cur = build_layer_attn(inp->get_attn(), cur, inp_pos, il,
+                    tg_gated ? tg_qr : nullptr, tg_gated ? tg_kb : nullptr, tg_gated ? tg_kb_keys : nullptr,
+                    tg_gated ? tg_qoff : nullptr);
         }
 
-        if (il == n_layer - 1 && crop_before_nextn(inp_out_ids)) {
+        // the bottom half ends at the gate layer: its outputs (every token, in practice) are cropped there
+        if ((il == n_layer - 1 && crop_before_nextn(inp_out_ids)) || (tg_bottom && il == tg_layer && inp_out_ids)) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -200,23 +288,29 @@ llama_model_qwen35moe::graph::graph(const llm_graph_params & params) :
         cur = ggml_add(ctx0, cur, inpSA);
         cb(cur, "attn_residual", il);
 
-        // Save the tensor before post-attention norm for residual connection
-        ggml_tensor * ffn_residual = cur;
+        // TokenGate bottom half: stop at the attention residual a_j of the gate layer and score it with the
+        // scoring branch on the layer's own post-attention norm
+        if (tg_bottom && il == tg_layer) {
+            const auto & layer = model.layers[il];
 
-        // Post-attention norm
-        ggml_tensor * attn_post_norm = build_norm(cur, model.layers[il].attn_post_norm, nullptr, LLM_NORM_RMS, il);
-        cb(attn_post_norm, "attn_post_norm", il);
+            ggml_tensor * z = build_norm(cur, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
+            ggml_tensor * score = build_ffn(z,
+                    layer.tg_up,   NULL, NULL,
+                    layer.tg_gate, NULL, NULL,
+                    layer.tg_down, NULL, NULL,
+                    NULL,
+                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+            cb(score, "tg_score", il);
 
-        // MOE FFN layer
-        cur = build_layer_ffn(attn_post_norm, il);
-        cb(cur, "ffn_out", il);
+            cur = ggml_concat(ctx0, cur, score, 0);
+            cb(cur, "tg_out", il);
+            res->t_embd = cur;
 
-        // Residual connection for FFN - add to the tensor from before post_attention_layernorm
-        cur = ggml_add(ctx0, cur, ffn_residual);
-        cb(cur, "post_moe", il);
+            ggml_build_forward_expand(gf, cur);
+            return;
+        }
 
-        cur = build_cvec(cur, il);
-        cb(cur, "l_out", il);
+        cur = build_tg_ffn(cur, il);
 
         // Input for next layer
         inpL = cur;
@@ -241,6 +335,34 @@ llama_model_qwen35moe::graph::graph(const llm_graph_params & params) :
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
+}
+
+// the feed-forward half of a layer from its attention residual: post-attention norm, MoE, residual, cvec
+ggml_tensor * llama_model_qwen35moe::graph::build_tg_ffn(ggml_tensor * ffn_residual, int il) {
+    ggml_tensor * attn_post_norm = build_norm(ffn_residual, model.layers[il].attn_post_norm, nullptr, LLM_NORM_RMS, il);
+    cb(attn_post_norm, "attn_post_norm", il);
+
+    // MOE FFN layer
+    ggml_tensor * cur = build_layer_ffn(attn_post_norm, il);
+    cb(cur, "ffn_out", il);
+
+    // Residual connection for FFN - add to the tensor from before post_attention_layernorm
+    cur = ggml_add(ctx0, cur, ffn_residual);
+    cb(cur, "post_moe", il);
+
+    cur = build_cvec(cur, il);
+    cb(cur, "l_out", il);
+
+    return cur;
+}
+
+bool llama_model_qwen35moe::tg_bottom_has_attn(const llama_hparams & hparams) {
+    for (int32_t il = 0; il <= hparams.tg_gate_layer && il < (int32_t) hparams.n_layer(); ++il) {
+        if (!hparams.is_recr(il)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35moe::graph::build_qkvz(
@@ -274,7 +396,11 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn(
         llm_graph_input_attn_kv * inp,
         ggml_tensor *             cur,
         ggml_tensor *             inp_pos,
-        int                       il) {
+        int                       il,
+        ggml_tensor *             tg_qr,
+        ggml_tensor *             tg_kb,
+        ggml_tensor *             tg_kb_keys,
+        ggml_tensor *             tg_qoff) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
 
@@ -324,9 +450,35 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn(
     // Attention computation
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
+    ggml_tensor * kq_b     = nullptr;
+    ggml_tensor * mask_add = nullptr;
+    if (tg_qr) {
+        // TokenGate gated softmax: per-(query, head) temperature, per-(key, head) gate bias
+        // tg_kbias is stored premultiplied by sqrt(d): kq_b is scaled by kq_scale in the softmax
+        GGML_ASSERT(model.layers[il].tg_qscale && model.layers[il].tg_kbias);
+        // a plain sequence in the same ubatch keeps its queries (factor 1); the per-head temperature comes first, so
+        // that a tensor split by heads (-sm tensor) broadcasts the per-token inputs
+        ggml_tensor * qf = ggml_mul(ctx0, ggml_repeat_4d(ctx0, model.layers[il].tg_qscale, 1, n_head, n_tokens, 1), tg_qr);
+        if (tg_qoff) {
+            qf = ggml_add(ctx0, qf, tg_qoff);
+        }
+        Qcur = ggml_mul(ctx0, Qcur, qf);
+        cb(Qcur, "Qcur_tg", il);
+        if (tg_kb_keys) {
+            // approximation: the head-mean of the bias coefficient, in the mask of the flash-attention path, which
+            // adds the mask unscaled
+            ggml_tensor * c = ggml_mean(ctx0, ggml_reshape_1d(ctx0, model.layers[il].tg_kbias, n_head));
+            mask_add = ggml_scale(ctx0, ggml_mul(ctx0, tg_kb_keys, c), kq_scale);
+            cb(mask_add, "kq_mask_tg", il);
+        } else {
+            kq_b = ggml_mul(ctx0, tg_kb, model.layers[il].tg_kbias);
+            cb(kq_b, "kq_b_tg", il);
+        }
+    }
+
     cur = build_attn(inp,
                 nullptr, nullptr, nullptr,
-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                Qcur, Kcur, Vcur, kq_b, nullptr, nullptr, kq_scale, il, mask_add);
     cb(cur, "attn_pregate", il);
 
     ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);

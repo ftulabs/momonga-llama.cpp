@@ -72,6 +72,10 @@ struct llama_hparams {
     uint32_t n_embd;
     uint32_t n_layer_all;
     uint32_t n_layer_nextn = 0;
+
+    // TokenGate: layer whose attention residual the gate scores, -1 = no gate
+    int32_t tg_gate_layer = -1;
+    float   tg_bnorm_w    = 1.0f; // gain of the RMSNorm of the gate scores over the document span
     uint32_t n_layer_decision = 0; // trailing blocks that form the decision head
 
     // granite-switch: index of the single-head "router" KV layer that encodes

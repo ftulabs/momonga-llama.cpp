@@ -3,6 +3,11 @@
 void llama_model_qwen3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 
+    uint32_t tg_layer = UINT32_MAX;
+    if (ml.get_key(LLM_KV_TOKENGATE_GATE_LAYER, tg_layer, false)) {
+        hparams.tg_gate_layer = (int32_t) tg_layer;
+    }
+
     switch (hparams.n_layer()) {
         case 28: type = hparams.n_embd == 1024 ? LLM_TYPE_0_6B : LLM_TYPE_1_7B; break;
         case 36: type = hparams.n_embd == 2560 ? LLM_TYPE_4B : LLM_TYPE_8B; break;
@@ -47,6 +52,18 @@ void llama_model_qwen3::load_arch_tensors(llama_model_loader &) {
         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
+
+        // TokenGate: the scoring branch is a clone of the gate layer's MLP with an absorbed 1-wide readout
+        const int32_t tg_layer = hparams.tg_gate_layer;
+        if (tg_layer >= 0 && i == tg_layer) {
+            layer.tg_gate = create_tensor(tn(LLM_TENSOR_TG_GATE, "weight", i), {n_embd, n_ff}, 0);
+            layer.tg_up   = create_tensor(tn(LLM_TENSOR_TG_UP,   "weight", i), {n_embd, n_ff}, 0);
+            layer.tg_down = create_tensor(tn(LLM_TENSOR_TG_DOWN, i),           {n_ff,   1},    0); // kept f32: it ranks the tokens
+        }
+        if (tg_layer >= 0 && i > tg_layer) {
+            layer.tg_qscale = create_tensor(tn(LLM_TENSOR_TG_QSCALE, i), {1, n_head},    0);
+            layer.tg_kbias  = create_tensor(tn(LLM_TENSOR_TG_KBIAS,  i), {1, 1, n_head}, 0);
+        }
     }
 }
 
@@ -56,6 +73,11 @@ std::unique_ptr<llm_graph_context> llama_model_qwen3::build_arch_graph(const llm
 
 llama_model_qwen3::graph::graph(const llm_graph_params & params) : llm_graph_context(params) {
     ggml_tensor * cur = build_backbone();
+
+    // TokenGate bottom half: the output is [a_j | gate score], no lm_head
+    if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM) {
+        return;
+    }
 
     // lm_head
     cur = build_lora_mm(model.output, cur, model.output_s);
@@ -73,6 +95,18 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone() {
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
+    // TokenGate (arXiv 2610.26754): the model runs as two contexts split at the gate layer L
+    //   bottom: layers [0, L) + the attention half of L, outputs [a_j | score_j] for every token
+    //   top:    the MLP half of L + layers (L, n_layer), over the kept tokens only, with the gated softmax
+    //           softmax(gamma_h r_q q.k / sqrt(d) + kb_k c_h) in every layer above L
+    const int32_t tg_layer  = hparams.tg_gate_layer;
+    const bool    tg_bottom = cparams.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM;
+    const bool    tg_top    = cparams.ctx_type == LLAMA_CONTEXT_TYPE_TG_TOP;
+    GGML_ASSERT(!(tg_bottom || tg_top) || tg_layer >= 0);
+
+    const int il_begin = tg_top    ? tg_layer     : 0;
+    const int il_end   = tg_bottom ? tg_layer + 1 : n_layer;
+
     inpL = build_inp_embd(model.tok_embd);
 
     // inp_pos - contains the positions
@@ -82,10 +116,27 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone() {
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
-    for (int il = 0; il < n_layer; ++il) {
+    ggml_tensor * tg_qr = nullptr; // [1, n_head, n_tokens] scaled-softmax ratio of each query
+    ggml_tensor * tg_qoff = nullptr;
+    ggml_tensor * tg_kb = nullptr; // [n_kv, 1, n_head]     gate bias of each key
+    if (tg_top) {
+        auto * inp_tg = build_inp_tokengate();
+        tg_qr   = ggml_repeat_4d(ctx0, inp_tg->qr, 1, n_head, n_tokens, 1);
+        tg_qoff = inp_tg->qoff;
+        tg_kb = ggml_repeat_4d(ctx0, inp_tg->kb, inp_tg->kb->ne[0], 1, n_head, inp_tg->kb->ne[3]);
+    }
+
+    for (int il = il_begin; il < il_end; ++il) {
         res->t_layer_inp[il] = inpL;
 
         ggml_tensor * inpSA = inpL;
+
+        // TokenGate top half: the attention of the gate layer ran in the bottom half
+        if (tg_top && il == tg_layer) {
+            cur = build_tg_ffn(inpL, il);
+            inpL = cur;
+            continue;
+        }
 
         // norm
         cur = build_norm(inpL,
@@ -113,35 +164,48 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone() {
             cb(Kcur, "Kcur", il);
             cb(Vcur, "Vcur", il);
 
+            ggml_tensor * kq_b = nullptr;
+            if (tg_top) {
+                // per-(query, head) temperature, per-(key, head) gate bias
+                // tg_kbias is stored premultiplied by sqrt(d): kq_b is scaled by kq_scale in the softmax
+                Qcur = ggml_mul(ctx0, Qcur, ggml_add(ctx0, ggml_mul(ctx0, tg_qr, model.layers[il].tg_qscale), tg_qoff));
+                cb(Qcur, "Qcur_tg", il);
+                kq_b = ggml_mul(ctx0, tg_kb, model.layers[il].tg_kbias);
+                cb(kq_b, "kq_b_tg", il);
+            }
+
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, kq_b, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
         }
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
         ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
         cb(ffn_inp, "ffn_inp", il);
 
-        // feed-forward network
-        cur = build_norm(ffn_inp,
-                model.layers[il].ffn_norm, NULL,
-                LLM_NORM_RMS, il);
-        cb(cur, "ffn_norm", il);
+        // TokenGate bottom half: stop at the attention residual a_j of the gate layer and score it
+        if (tg_bottom && il == tg_layer) {
+            const auto & layer = model.layers[il];
 
-        cur = build_ffn(cur,
-                model.layers[il].ffn_up,   NULL, model.layers[il].ffn_up_s,
-                model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
-                model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
-                NULL,
-                LLM_FFN_SILU, LLM_FFN_PAR, il);
-        cb(cur, "ffn_out", il);
+            ggml_tensor * z = build_norm(ffn_inp, layer.ffn_norm, NULL, LLM_NORM_RMS, il);
+            ggml_tensor * score = build_ffn(z,
+                    layer.tg_up,   NULL, NULL,
+                    layer.tg_gate, NULL, NULL,
+                    layer.tg_down, NULL, NULL,
+                    NULL,
+                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+            cb(score, "tg_score", il);
 
-        cur = ggml_add(ctx0, cur, ffn_inp);
+            cur = ggml_concat(ctx0, ffn_inp, score, 0);
+            cb(cur, "tg_out", il);
+            res->t_embd = cur;
 
-        cur = build_cvec(cur, il);
-        cb(cur, "l_out", il);
+            return cur;
+        }
+
+        cur = build_tg_ffn(ffn_inp, il);
 
         // input for next layer
         inpL = cur;
@@ -154,6 +218,29 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone() {
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
+
+    return cur;
+}
+
+// the feed-forward half of a layer: ffn_inp + MLP(norm(ffn_inp))
+ggml_tensor * llama_model_qwen3::graph::build_tg_ffn(ggml_tensor * ffn_inp, int il) {
+    ggml_tensor * cur = build_norm(ffn_inp,
+            model.layers[il].ffn_norm, NULL,
+            LLM_NORM_RMS, il);
+    cb(cur, "ffn_norm", il);
+
+    cur = build_ffn(cur,
+            model.layers[il].ffn_up,   NULL, model.layers[il].ffn_up_s,
+            model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
+            model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
+            NULL,
+            LLM_FFN_SILU, LLM_FFN_PAR, il);
+    cb(cur, "ffn_out", il);
+
+    cur = ggml_add(ctx0, cur, ffn_inp);
+
+    cur = build_cvec(cur, il);
+    cb(cur, "l_out", il);
 
     return cur;
 }

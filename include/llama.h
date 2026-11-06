@@ -226,6 +226,12 @@ extern "C" {
     enum llama_context_type {
         LLAMA_CONTEXT_TYPE_DEFAULT = 0,
         LLAMA_CONTEXT_TYPE_MTP     = 1,
+        // TokenGate (arXiv 2610.26754): the model is split at the gate layer L into two contexts
+        //   TG_BOTTOM: layers [0, L] up to the attention residual of L; outputs [a_j | gate score] per token
+        //   TG_TOP:    MLP of layer L + layers (L, n_layer); takes a_j as input embeddings and only
+        //              ever holds the kept tokens in its KV cache (positions may have gaps)
+        LLAMA_CONTEXT_TYPE_TG_BOTTOM = 2,
+        LLAMA_CONTEXT_TYPE_TG_TOP    = 3,
     };
 
     // TODO: simplify (https://github.com/ggml-org/llama.cpp/pull/9294#pullrequestreview-2286561979)
@@ -416,6 +422,7 @@ extern "C" {
         bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+        bool tokengate;   // [EXPERIMENTAL] split the memory at the TokenGate gate layer, see llama_tokengate_prefill()
 
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
@@ -1168,6 +1175,107 @@ extern "C" {
     // when pooling_type == LLAMA_POOLING_TYPE_RANK, returns float[n_cls_out] with the rank(s) of the sequence
     // otherwise: float[n_embd] (1-dimensional)
     LLAMA_API float * llama_get_embeddings_seq(struct llama_context * ctx, llama_seq_id seq_id);
+
+    //
+    // TokenGate [EXPERIMENTAL]
+    //
+
+    // gate layer L of a TokenGate model, -1 if the model has no gate
+    LLAMA_API int32_t llama_model_tokengate_layer(const struct llama_model * model);
+
+    // TG_TOP context: per-position softmax-form inputs of the gated layers
+    //   qr[i]: scaled-softmax ratio r of the query at pos[i] (log(slot)/log(pos+1), clamped to <= 1)
+    //   kb[i]: key bias of the token at pos[i] (normalized gate score * r of its slot, 0 = no bias)
+    // positions that were never set use qr = 1, kb = 0
+    LLAMA_API void llama_tokengate_set(
+            struct llama_context * ctx,
+               const llama_pos * pos,
+                   const float * qr,
+                   const float * kb,
+                         int32_t n);
+
+    LLAMA_API void llama_tokengate_clear(struct llama_context * ctx);
+
+    // TokenGate in a single context (llama_context_params.tokengate): prefill the prompt tokens [0, n_tokens) of the
+    // empty sequence seq_id through the gate (one sequence at a time, the others keep their state). The document span [span_beg, span_end) is pruned to its k best tokens
+    // (w > 0: the reference's +-w dilation), the rest of the prompt is kept whole; the span must end before the last
+    // token. No logits are computed: decode the next prompt token(s) as usual. The context is then in TokenGate decode
+    // mode, every new token runs through both halves, until llama_tokengate_reset(), which must be called when the
+    // sequence is cleared. Returns 0 on success, the error of the failing llama_decode() otherwise.
+    LLAMA_API int32_t llama_tokengate_prefill(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+               const llama_token * tokens,
+                         int32_t   n_tokens,
+                         int32_t   span_beg,
+                         int32_t   span_end,
+                         int32_t   k,
+                         int32_t   w);
+
+    // TokenGate on top of what the sequence holds (a cached prefix, plain or with gated documents): seq_id holds the
+    // positions [0, pos), and the n_tokens tokens go to the positions [pos, pos + n_tokens): the first n_doc are a
+    // document, the rest are kept whole (e.g. the prompt up to its last token or to the next document). The bottom half
+    // runs over all of them, the gate keeps the k best document tokens (w > 0: +-w dilation), the top half runs over
+    // the kept ones. No logits: decode the next token(s) as usual, they and every later token run through both halves,
+    // the top one gated. The gated documents follow the sequence: a removal of its end (llama_memory_seq_rm) drops the
+    // documents there, a sequence state save/restore carries them, and a removal that would cut a document fails.
+    // Returns 0 on success; on failure the sequence is cleared.
+    LLAMA_API int32_t llama_tokengate_prefill_doc(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+               const llama_token * tokens,
+                         int32_t   n_tokens,
+                         int32_t   n_doc,
+                         int32_t   k,
+                         int32_t   w);
+
+    // the gated documents of seq_id, in order: returns their number and fills up to n_max of them ([beg, end) span in
+    // positions, the gate's k and w, fa = 1 if its prefill took the flash-attention form); any array can be NULL
+    LLAMA_API int32_t llama_tokengate_seq_docs(
+            const struct llama_context * ctx,
+                          llama_seq_id   seq_id,
+                               int32_t * beg,
+                               int32_t * end,
+                               int32_t * k,
+                               int32_t * w,
+                               int32_t * fa,
+                               int32_t   n_max);
+
+    // the kept positions of seq_id before pos, for a pos after its last gated document (pos for a sequence without
+    // one; -1 for a pos before the end of its last document)
+    LLAMA_API int32_t llama_tokengate_seq_n_kept(const struct llama_context * ctx, llama_seq_id seq_id, llama_pos pos);
+
+    // leave the TokenGate decode mode of every sequence (the sequences must be cleared, or cleared next)
+    LLAMA_API void llama_tokengate_reset(struct llama_context * ctx);
+
+    // leave the TokenGate decode mode of one sequence (clear it, or clear it next)
+    LLAMA_API void llama_tokengate_reset_seq(struct llama_context * ctx, llama_seq_id seq_id);
+
+    // the gate's paired LoRA adapter: among the context's adapters (llama_set_adapters_lora), it is applied to the
+    // tokens of gated sequences only, so gated and plain sequences share a batch without switching adapters
+    LLAMA_API void llama_tokengate_set_adapter(struct llama_context * ctx, struct llama_adapter_lora * adapter);
+
+    // the context was created with the TokenGate memory (llama_context_params.tokengate and a model that supports it)
+    LLAMA_API bool llama_tokengate_enabled(const struct llama_context * ctx);
+
+    // [EXPERIMENTAL] the gated layers use flash attention with the head-mean of their per-head key bias in the mask,
+    // an approximation of the exact (per-head, non-flash) form; takes effect from the next decode
+    LLAMA_API void llama_tokengate_set_fa(struct llama_context * ctx, bool value);
+
+    // the gated layers take the flash-attention form (set by llama_tokengate_set_fa, forced by -sm tensor)
+    LLAMA_API bool llama_tokengate_get_fa(const struct llama_context * ctx);
+
+    // the context is in TokenGate decode mode
+    LLAMA_API bool llama_tokengate_active(const struct llama_context * ctx);
+
+    // the positions the last prefill kept (ascending): of the whole prompt for llama_tokengate_prefill(), of the
+    // document for llama_tokengate_prefill_doc()
+    LLAMA_API int32_t           llama_tokengate_n_kept(const struct llama_context * ctx);
+    LLAMA_API const llama_pos * llama_tokengate_kept  (const struct llama_context * ctx);
+
+    // with unmasked nextn embeddings (llama_set_embeddings_nextn): the [n_kept][n_embd_out] hidden states of the kept
+    // prompt tokens, for an MTP draft; nullptr otherwise
+    LLAMA_API const float * llama_tokengate_kept_h(const struct llama_context * ctx);
 
     //
     // backend sampling API [EXPERIMENTAL]

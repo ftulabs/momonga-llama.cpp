@@ -609,7 +609,11 @@ struct llama_model_qwen3 : public llama_model_base {
         graph(const llm_graph_params & params, no_build) : llm_graph_context(params) {}
 
         // the layers and the final norm: [n_embd, n_outputs]
+        // the layers and the final norm: [n_embd, n_outputs]
         ggml_tensor * build_backbone();
+
+        // the feed-forward half of layer il, residual included
+        ggml_tensor * build_tg_ffn(ggml_tensor * ffn_inp, int il);
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
@@ -2837,14 +2841,23 @@ struct llama_model_qwen35moe : public llama_model_base {
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
 
+    // TokenGate: the bottom half (layers [0, L]) holds at least one full-attention layer
+    static bool tg_bottom_has_attn(const llama_hparams & hparams);
+
     struct graph : public llm_build_delta_net_base {
         graph(const llm_graph_params & params);
     private:
+        // tg_qr / tg_kb: the TokenGate softmax form of a gated layer (TG_TOP contexts and phases), nullptr otherwise;
+        // tg_kb_keys: the per-key gate bias [n_kv] behind tg_kb, for the flash-attention approximation
         ggml_tensor * build_layer_attn(
         llm_graph_input_attn_kv * inp_attn,
                     ggml_tensor * cur,
                     ggml_tensor * inp_pos,
-                            int   il);
+                            int   il,
+                    ggml_tensor * tg_qr = nullptr,
+                    ggml_tensor * tg_kb = nullptr,
+                    ggml_tensor * tg_kb_keys = nullptr,
+                    ggml_tensor * tg_qoff = nullptr);
 
         ggml_tensor * build_layer_attn_linear(
              llm_graph_input_rs * inp,
@@ -2853,6 +2866,11 @@ struct llama_model_qwen35moe : public llama_model_base {
 
         ggml_tensor * build_layer_ffn(
                     ggml_tensor * cur,
+                            int   il);
+
+        // the feed-forward half of layer il from its attention residual: norm, MoE, residual, cvec
+        ggml_tensor * build_tg_ffn(
+                    ggml_tensor * ffn_residual,
                             int   il);
 
         ggml_tensor * build_norm_gated(

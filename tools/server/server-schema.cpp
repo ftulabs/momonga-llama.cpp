@@ -228,6 +228,27 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Minimum hits at ngram lookup for mgram to be proposed"));
 #endif
 
+    add((new field_json("tokengate"))
+        ->set_desc("TokenGate for this request (needs --tokengate): false prefills the whole prompt, true or {\"k\": N, \"dilate\": W} prunes the marked document to its N best tokens")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            const auto & tg = data.at("tokengate");
+            if (tg.is_boolean()) {
+                ctx.params.tokengate = tg.get<bool>() ? 1 : 0;
+            } else if (tg.is_object()) {
+                ctx.params.tokengate        = 1;
+                ctx.params.tokengate_k      = json_value(tg, "k",      0);
+                ctx.params.tokengate_dilate = json_value(tg, "dilate", -1);
+                if (tg.contains("fa")) {
+                    ctx.params.tokengate_fa = tg.at("fa").get<bool>() ? 1 : 0;
+                }
+                if (ctx.params.tokengate_k < 0) {
+                    throw std::runtime_error("Error: 'tokengate.k' must be positive");
+                }
+            } else {
+                throw std::runtime_error("Error: 'tokengate' must be a boolean or an object with 'k' and 'dilate' fields");
+            }
+        }));
+
     add((new field_json("lora"))
         ->set_desc("A list of LoRA adapters to apply to this request. Each entry must have `id` and `scale` fields. Adapters not listed default to scale 0.0")
         ->set_handler([&](field_eval_context & ctx, const json & data) {

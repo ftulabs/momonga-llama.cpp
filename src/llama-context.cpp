@@ -7,17 +7,20 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-memory-hybrid-tg.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-moe-cache.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
+#include "llama-tokengate.h"
 #include "llama.h"
 
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <queue>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -112,8 +115,10 @@ static void llama_verify_hadamard_graph(
 
 static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     switch (ctx_type) {
-        case LLAMA_CONTEXT_TYPE_DEFAULT: return LLM_GRAPH_TYPE_DEFAULT;
-        case LLAMA_CONTEXT_TYPE_MTP    : return LLM_GRAPH_TYPE_DECODER_MTP;
+        case LLAMA_CONTEXT_TYPE_DEFAULT:   return LLM_GRAPH_TYPE_DEFAULT;
+        case LLAMA_CONTEXT_TYPE_MTP:       return LLM_GRAPH_TYPE_DECODER_MTP;
+        case LLAMA_CONTEXT_TYPE_TG_BOTTOM:
+        case LLAMA_CONTEXT_TYPE_TG_TOP:    return LLM_GRAPH_TYPE_DEFAULT;
     }
     throw std::runtime_error("Unsupported ctx type");
 }
@@ -227,6 +232,8 @@ llama_context::llama_context(
     embd_layer_inp.resize(hparams.n_layer() + 1);
 
     cparams.ctx_type          = params.ctx_type;
+    cparams.tg_states         = &tg_states;
+    tg_states.seqs.resize(cparams.n_seq_max);
     cparams.rope_scaling_type = params.rope_scaling_type;
     cparams.pooling_type      = params.pooling_type;
 
@@ -533,6 +540,37 @@ llama_context::llama_context(
         }
     }
 
+    // TokenGate in a single context: the memory is split at the gate layer (llama_memory_hybrid_tg)
+    cparams.tokengate = false;
+    cparams.tg_phase  = LLAMA_TG_PHASE_NONE;
+    if (params.tokengate) {
+        bool bottom_has_attn = false;
+        for (int32_t il = 0; il <= hparams.tg_gate_layer && il < (int32_t) hparams.n_layer(); ++il) {
+            bottom_has_attn = bottom_has_attn || !hparams.is_recr(il);
+        }
+
+        const char * why = nullptr;
+        if (hparams.tg_gate_layer < 0) {
+            why = "the model has no gate";
+        } else if (model.arch != LLM_ARCH_QWEN35MOE) {
+            why = "only qwen35moe models are supported";
+        } else if (cparams.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT) {
+            why = "only default contexts are supported";
+        } else if (!bottom_has_attn) {
+            why = "no full-attention layer at or below the gate layer";
+        } else if (ggml_is_quantized(params.type_v)) {
+            // the gated layers take a per-key bias, which the flash-attention path cannot
+            why = "the gated layers need a non-quantized V cache";
+        }
+
+        if (why) {
+            LLAMA_LOG_WARN("%s: TokenGate disabled: %s\n", __func__, why);
+        } else {
+            cparams.tokengate = true;
+            LLAMA_LOG_INFO("%s: TokenGate enabled, memory split at the gate layer %d\n", __func__, hparams.tg_gate_layer);
+        }
+    }
+
     // init the memory module
     if (!hparams.vocab_only) {
         llama_memory_params params_mem = {
@@ -545,6 +583,14 @@ llama_context::llama_context(
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
+
+        if (cparams.tokengate) {
+            auto * mem_tg = dynamic_cast<llama_memory_hybrid_tg *>(memory.get());
+            if (mem_tg == nullptr) {
+                throw std::runtime_error("TokenGate: the model did not create a split memory");
+            }
+            mem_tg->set_tg_states(&tg_states);
+        }
     }
 
     // init backends
@@ -1171,6 +1217,510 @@ float * llama_context::get_embeddings_ith(int32_t i) {
 #endif
     }
 }
+
+// TG_TOP contexts hold a single sequence: the tables of sequence 0
+void llama_context::tokengate_set(const llama_pos * pos, const float * qr, const float * kb, int32_t n) {
+    auto & st = tg_states.seqs.at(0);
+    st.active = true;
+    for (int32_t i = 0; i < n; ++i) {
+        GGML_ASSERT(pos[i] >= 0);
+        const size_t p = pos[i];
+        if (p >= st.qr.size()) {
+            st.qr.resize(p + 1, 1.0f);
+            st.kb.resize(p + 1, 0.0f);
+        }
+        st.qr[p] = qr ? qr[i] : 1.0f;
+        st.kb[p] = kb ? kb[i] : 0.0f;
+    }
+}
+
+void llama_context::tokengate_clear() {
+    for (auto & st : tg_states.seqs) {
+        st.clear();
+    }
+}
+
+void llama_context::tokengate_set_phase(llama_tg_phase phase) {
+    GGML_ASSERT(cparams.tokengate && phase != LLAMA_TG_PHASE_DECODE);
+
+    tg_prefill_phase = phase;
+    cparams.tg_phase = phase;
+    static_cast<llama_memory_hybrid_tg *>(memory.get())->set_phase(phase);
+}
+
+int32_t llama_context::tokengate_prefill(
+        llama_seq_id seq_id, const llama_token * tokens, int32_t n_tokens,
+        int32_t span_beg, int32_t span_end, int32_t k, int32_t w) {
+    if (seq_id < 0 || (uint32_t) seq_id >= cparams.n_seq_max) {
+        LLAMA_LOG_ERROR("%s: invalid seq_id = %d\n", __func__, seq_id);
+        return -1;
+    }
+    if (cparams.tokengate) {
+        auto * mem = static_cast<llama_memory_hybrid_tg *>(memory.get());
+        if (mem->get_lo()->seq_pos_max(seq_id) >= 0 || mem->get_hi()->seq_pos_max(seq_id) >= 0) {
+            LLAMA_LOG_ERROR("%s: sequence %d is not empty\n", __func__, seq_id);
+            return -1;
+        }
+        tg_states.seqs[seq_id].clear();
+    }
+    return tokengate_prefill_ext(seq_id, tokens, n_tokens, 0, span_beg, span_end, k, w);
+}
+
+int32_t llama_context::tokengate_prefill_doc(llama_seq_id seq_id, const llama_token * tokens, int32_t n_tokens, int32_t n_doc, int32_t k, int32_t w) {
+    if (!cparams.tokengate) {
+        LLAMA_LOG_ERROR("%s: the context has no TokenGate memory (llama_context_params.tokengate)\n", __func__);
+        return -1;
+    }
+    if (seq_id < 0 || (uint32_t) seq_id >= cparams.n_seq_max) {
+        LLAMA_LOG_ERROR("%s: invalid seq_id = %d\n", __func__, seq_id);
+        return -1;
+    }
+    if (n_doc <= 0 || n_doc > n_tokens) {
+        LLAMA_LOG_ERROR("%s: invalid document length %d of %d tokens\n", __func__, n_doc, n_tokens);
+        return -1;
+    }
+    auto * mem = static_cast<llama_memory_hybrid_tg *>(memory.get());
+    const llama_pos pos0 = mem->get_lo()->seq_pos_max(seq_id) + 1;
+    return tokengate_prefill_ext(seq_id, tokens, n_tokens, pos0, pos0, pos0 + n_doc, k, w);
+}
+
+int32_t llama_context::tokengate_prefill_ext(
+        llama_seq_id seq_id, const llama_token * tokens, int32_t n_tokens, llama_pos pos0,
+        int32_t span_beg, int32_t span_end, int32_t k, int32_t w) {
+    if (!cparams.tokengate) {
+        LLAMA_LOG_ERROR("%s: the context has no TokenGate memory (llama_context_params.tokengate)\n", __func__);
+        return -1;
+    }
+    if (seq_id < 0 || (uint32_t) seq_id >= cparams.n_seq_max || !tokens || k <= 0 || n_tokens <= 0 || pos0 < 0 ||
+        span_beg < pos0 || span_beg >= span_end || span_end > pos0 + n_tokens) {
+        LLAMA_LOG_ERROR("%s: invalid arguments: seq_id = %d, positions [%d, %d), span = [%d, %d), k = %d\n",
+                __func__, seq_id, pos0, pos0 + n_tokens, span_beg, span_end, k);
+        return -1;
+    }
+    if (cparams.pooling_type != LLAMA_POOLING_TYPE_NONE || !cparams.causal_attn) {
+        LLAMA_LOG_ERROR("%s: TokenGate needs causal attention without pooling\n", __func__);
+        return -1;
+    }
+
+    const auto & hparams = model.hparams;
+
+    const int32_t n_embd = hparams.n_embd;
+    const int32_t n_out  = n_embd + 1; // [a_j | raw gate score] per prompt token
+    GGML_ASSERT((int64_t) hparams.n_embd_inp() == n_embd);
+
+    auto * mem = static_cast<llama_memory_hybrid_tg *>(memory.get());
+
+    auto & st = tg_states.seqs[seq_id];
+
+    // the sequence holds exactly the positions before pos0 in both halves (a gated one keeps every token after its
+    // last document), and the new positions come after its last document
+    // (the upper half of a gated sequence may end inside its last document, which can be the end of the sequence)
+    const llama_pos hi_max = mem->get_hi()->seq_pos_max(seq_id);
+    const bool hi_ok = hi_max == pos0 - 1 || (st.active && st.n_prompt == pos0 && hi_max < pos0);
+    if (mem->get_lo()->seq_pos_max(seq_id) != pos0 - 1 || !hi_ok || (st.active && st.n_prompt > pos0)) {
+        LLAMA_LOG_ERROR("%s: sequence %d does not end at position %d (lo %d, hi %d, gated up to %d)\n", __func__,
+                seq_id, pos0, mem->get_lo()->seq_pos_max(seq_id), mem->get_hi()->seq_pos_max(seq_id),
+                st.active ? st.n_prompt : -1);
+        return -1;
+    }
+
+    tg_kept.clear();
+    tg_kept_h.clear();
+
+    // [EXPERIMENTAL] TG_TIMING=1: the time of each step of the gated prefill
+    static const bool tg_timing = getenv("TG_TIMING") != nullptr;
+    int64_t t_mark = ggml_time_us();
+    auto tmark = [&](const char * what) {
+        if (tg_timing) {
+            synchronize();
+            const int64_t t = ggml_time_us();
+            LLAMA_LOG_INFO("%s: TG_TIMING %-24s %9.1f ms\n", __func__, what, (t - t_mark) / 1000.0);
+            t_mark = t;
+        }
+    };
+
+    // a pending reserve runs with the plain graph
+    cparams.tg_phase = LLAMA_TG_PHASE_NONE;
+    sched_reserve();
+    tmark("reserve");
+
+    const bool embd_prev = cparams.embeddings;
+
+    // the tables before pos0: the positions after an earlier document were each at the next kept slot
+    const int32_t m0 = st.active ? st.n_kept_before(pos0) : pos0; // kept positions before pos0
+    if (st.active) {
+        for (llama_pos p = st.n_prompt; p < pos0; ++p) {
+            st.qr.resize(p + 1, 1.0f);
+            st.kb.resize(p + 1, 0.0f);
+            st.qr[p] = st.get_qr(p);
+            st.kb[p] = 0.0f;
+        }
+    }
+
+    int32_t ret = 0;
+
+    llama_batch_ext * batch = llama_batch_ext_init(this);
+
+    // [EXPERIMENTAL] TG_STREAM_ROWS=1: keep the rows of the running top-k span tokens only, as each batch of the
+    // bottom half comes out (a bounded admission bank, cf. EdgeRock); the selection is the same, from the scores of
+    // every token, so the result is too. Needs no dilation (the neighbours of an anchor could be any row)
+    static const bool stream_env = getenv("TG_STREAM_ROWS") != nullptr;
+    const int32_t n_span_new = span_end - span_beg;
+    const int32_t k_sel      = std::max(1, std::min(k, n_span_new));
+    const bool    stream     = stream_env && w == 0 && hparams.tg_bnorm_w != 0.0f;
+    const float   key_sign   = hparams.tg_bnorm_w < 0.0f ? -1.0f : 1.0f; // the order of bn = raw * inv_rms * bnorm_w
+
+    std::vector<float>   tg_raw(n_tokens, 0.0f); // the raw score of every new position
+    std::vector<float>   row_pool;               // stream: the kept rows
+    std::vector<int32_t> row_slot;               // stream: the pool slot of each position's row, -1 = dropped
+    std::vector<int32_t> row_free;
+    int32_t              row_peak = 0;
+    using key_pos = std::pair<float, int32_t>;
+    auto key_gt = [](const key_pos & x, const key_pos & y) { return x.first > y.first; };
+    std::priority_queue<key_pos, std::vector<key_pos>, decltype(key_gt)> top(key_gt); // min-heap of the top-k
+    std::vector<key_pos> ties; // dropped from the heap with the k-th key: the selection may still take them
+
+    auto row_keep = [&](int32_t i, const float * src) {
+        int32_t s;
+        if (!row_free.empty()) {
+            s = row_free.back();
+            row_free.pop_back();
+        } else {
+            s = (int32_t) (row_pool.size() / n_out);
+            row_pool.resize(row_pool.size() + n_out);
+        }
+        std::memcpy(row_pool.data() + (size_t) s * n_out, src, n_out * sizeof(float));
+        row_slot[i] = s;
+        row_peak = std::max(row_peak, (int32_t) (row_pool.size() / n_out) - (int32_t) row_free.size());
+    };
+    auto row_drop = [&](int32_t i) {
+        row_free.push_back(row_slot[i]);
+        row_slot[i] = -1;
+    };
+    // a row is dropped only if its key is clearly below the k-th one: the selection orders the rescaled scores,
+    // whose rounding can tie two keys that differ here
+    auto below = [](float key, float ref) { return key < ref - std::abs(ref) * 1e-5f; };
+    auto stream_batch = [&](int32_t i0, int32_t n) {
+        for (int32_t i = i0; i < i0 + n; ++i) {
+            const float * row = tg_a.data() + (size_t) (i - i0) * n_out;
+            const llama_pos p = pos0 + i;
+            tg_raw[i] = row[n_embd];
+            if (p < span_beg || p >= span_end) {
+                row_keep(i, row);
+                continue;
+            }
+            const float key = row[n_embd] * key_sign;
+            if ((int32_t) top.size() < k_sel) {
+                row_keep(i, row);
+                top.push({ key, i });
+                continue;
+            }
+            if (below(key, top.top().first)) {
+                continue;
+            }
+            row_keep(i, row);
+            top.push({ key, i });
+            const key_pos out = top.top();
+            top.pop();
+            if (!below(out.first, top.top().first)) {
+                ties.push_back(out);
+            } else {
+                row_drop(out.second);
+            }
+            for (size_t t = 0; t < ties.size(); ) {
+                if (below(ties[t].first, top.top().first)) {
+                    row_drop(ties[t].second);
+                    ties[t] = ties.back();
+                    ties.pop_back();
+                } else {
+                    ++t;
+                }
+            }
+        }
+    };
+
+    // phase 1: the bottom half over the new positions; decode() copies [a_j | score] of every token into tg_a (no
+    // outputs: the output buffer is sized for logits, and a server caps the outputs per batch)
+    tg_a.assign((size_t) (stream ? std::min<int32_t>(cparams.n_batch, n_tokens) : n_tokens) * n_out, 0.0f);
+    tg_a_pos0 = pos0;
+    if (stream) {
+        row_slot.assign(n_tokens, -1);
+    }
+    {
+        tokengate_set_phase(LLAMA_TG_PHASE_BOTTOM);
+        cparams.embeddings = false;
+
+        const int32_t n_batch = cparams.n_batch;
+        for (int32_t i0 = 0; i0 < n_tokens && ret == 0; i0 += n_batch) {
+            const int32_t n = std::min(n_batch, n_tokens - i0);
+
+            if (stream) {
+                tg_a_pos0 = pos0 + i0; // the rows of this batch only
+            }
+
+            llama_batch_ext_clear(batch);
+            for (int32_t i = 0; i < n; ++i) {
+                const llama_pos pos = pos0 + i0 + i;
+                const int32_t idx = llama_batch_ext_add_token(batch, seq_id, tokens[i0 + i]);
+                llama_batch_ext_set_pos(batch, idx, &pos);
+                llama_batch_ext_set_output_logits(batch, idx, false);
+            }
+
+            ret = decode(*batch);
+            if (ret != 0) {
+                LLAMA_LOG_ERROR("%s: bottom half failed at token %d: %d\n", __func__, i0, ret);
+            } else if (stream) {
+                synchronize();
+                stream_batch(i0, n);
+            }
+            tmark("bottom batch");
+        }
+
+        synchronize();
+    }
+    if (!stream) {
+        for (int32_t i = 0; i < n_tokens; ++i) {
+            tg_raw[i] = tg_a[(size_t) i * n_out + n_embd];
+        }
+    }
+    auto a_row = [&](llama_pos p) -> const float * {
+        if (stream) {
+            GGML_ASSERT(row_slot[p - pos0] >= 0);
+            return row_pool.data() + (size_t) row_slot[p - pos0] * n_out;
+        }
+        return tg_a.data() + (size_t) (p - pos0) * n_out;
+    };
+
+    // the gate: RMS-normalize the raw scores over the span, keep the top-k span tokens and the rest of the prompt
+    if (ret == 0) {
+        const int32_t n_span = span_end - span_beg;
+
+        double ss = 0.0;
+        for (int32_t i = span_beg; i < span_end; ++i) {
+            const double r = tg_raw[i - pos0];
+            ss += r*r;
+        }
+        const float inv_rms = (float) (1.0 / std::sqrt(ss / n_span + 1e-6));
+
+        std::vector<float> bn(n_span);
+        for (int32_t i = 0; i < n_span; ++i) {
+            bn[i] = tg_raw[span_beg + i - pos0] * inv_rms * hparams.tg_bnorm_w;
+        }
+
+        tmark("scores");
+        const std::vector<int32_t> sel = llama_tg_select(bn, k_sel, w);
+        if (stream) {
+            LLAMA_LOG_INFO("%s: TG_STREAM_ROWS: peak %d rows of %d (%.1f MiB instead of %.1f MiB)\n", __func__,
+                    row_peak, n_tokens, row_peak * n_out * 4.0 / (1 << 20), (double) n_tokens * n_out * 4.0 / (1 << 20));
+        }
+
+        std::vector<float> kb_kept;
+        tg_kept.clear();
+        tg_kept.reserve((span_beg - pos0) + sel.size() + (pos0 + n_tokens - span_end));
+        for (int32_t i = pos0; i < span_beg; ++i) {
+            tg_kept.push_back(i);
+            kb_kept.push_back(0.0f);
+        }
+        for (int32_t j : sel) {
+            tg_kept.push_back(span_beg + j);
+            kb_kept.push_back(bn[j]);
+        }
+        const int32_t n_kept_end = m0 + (int32_t) tg_kept.size(); // kept positions before span_end
+        for (int32_t i = span_end; i < pos0 + n_tokens; ++i) {
+            tg_kept.push_back(i);
+            kb_kept.push_back(0.0f);
+        }
+
+        // the softmax form of the gated layers: per-slot ratio r, key bias = normalized score * r; the positions
+        // from span_end on are all kept, each at the next slot (llama_tg_state::get_qr)
+        st.qr.resize(span_end, 1.0f);
+        st.kb.resize(span_end, 0.0f);
+        for (llama_pos p = pos0; p < span_end; ++p) {
+            st.qr[p] = 1.0f;
+            st.kb[p] = 0.0f;
+        }
+        for (size_t m = 0; m < tg_kept.size() && tg_kept[m] < span_end; ++m) {
+            const float r = llama_tg_ssmax_ratio((int64_t) m0 + m + 1, tg_kept[m]);
+            st.qr[tg_kept[m]] = r;
+            st.kb[tg_kept[m]] = kb_kept[m] * r;
+        }
+        st.n_prompt = span_end;
+        st.n_kept   = n_kept_end;
+        st.docs.push_back({ span_beg, span_end, k, w, n_kept_end, cparams.tg_fa_mean ? 1 : 0 });
+        // the top half reads the tables already
+        st.active   = true;
+    }
+
+    tmark("select + tables");
+
+    // phase 2: the top half over the kept tokens, from their a_j; the non-flash gated attention of a ubatch is
+    // [n_kv, n_ubatch, n_head] wide, so the ubatches are kept small
+    if (ret == 0) {
+        tokengate_set_phase(LLAMA_TG_PHASE_TOP);
+        cparams.embeddings = false;
+
+        const bool want_h = cparams.embeddings_nextn && !cparams.embeddings_nextn_masked;
+
+        const int32_t n_embd_h = hparams.n_embd_out();
+        const int32_t n_kept   = (int32_t) tg_kept.size();
+        if (want_h) {
+            tg_kept_h.resize((size_t) n_kept * n_embd_h);
+        }
+
+        const int32_t n_top = cparams.tg_fa_mean ? (int32_t) cparams.n_ubatch : std::min<int32_t>(cparams.n_ubatch, 512);
+        for (int32_t i0 = 0; i0 < n_kept && ret == 0; i0 += n_top) {
+            const int32_t n = std::min(n_top, n_kept - i0);
+
+            llama_batch_ext_clear(batch);
+            for (int32_t i = 0; i < n; ++i) {
+                const llama_pos p = tg_kept[i0 + i];
+                const llama_pos pos[4] = { p, p, p, 0 };
+                const llama_embd e = { a_row(p), 1, (size_t) n_embd };
+                const int32_t idx = llama_batch_ext_add_embd(batch, seq_id, e);
+                llama_batch_ext_set_pos(batch, idx, pos);
+                // one output per batch, the logits are not used
+                llama_batch_ext_set_output_logits(batch, idx, i == n - 1);
+            }
+
+            ret = decode(*batch);
+            if (ret != 0) {
+                LLAMA_LOG_ERROR("%s: top half failed at kept token %d: %d\n", __func__, i0, ret);
+                break;
+            }
+            tmark("top batch");
+
+            if (want_h) {
+                synchronize();
+                const float * h = get_embeddings_nextn();
+                if (!h) {
+                    ret = -3;
+                    break;
+                }
+                std::memcpy(tg_kept_h.data() + (size_t) i0 * n_embd_h, h, (size_t) n * n_embd_h * sizeof(float));
+            }
+        }
+    }
+
+    llama_batch_ext_free(batch);
+
+    cparams.embeddings = embd_prev;
+
+    tg_a.clear();
+    tg_a.shrink_to_fit();
+    tg_a_pos0 = 0;
+
+    // both halves from now on: the ubatches of the sequence take the gated graph
+    tokengate_set_phase(LLAMA_TG_PHASE_NONE);
+
+    if (ret != 0) {
+        // the bottom half cannot roll back its recurrent state: leave nothing of the sequence behind
+        memory->seq_rm(seq_id, -1, -1);
+        st.clear();
+        tg_kept.clear();
+        tg_kept_h.clear();
+        return ret;
+    }
+
+    LLAMA_LOG_DEBUG("%s: seq %d: positions [%d, %d), span [%d, %d) -> %d kept (k = %d, w = %d, %d kept before)\n",
+            __func__, seq_id, pos0, pos0 + n_tokens, span_beg, span_end, (int) tg_kept.size(), k, w, m0);
+
+    return 0;
+}
+
+int32_t llama_context::tokengate_seq_docs(llama_seq_id seq_id, int32_t * beg, int32_t * end, int32_t * k, int32_t * w, int32_t * fa, int32_t n_max) const {
+    if (seq_id < 0 || (size_t) seq_id >= tg_states.seqs.size()) {
+        return 0;
+    }
+    const auto & docs = tg_states.seqs[seq_id].docs;
+    for (int32_t i = 0; i < n_max && i < (int32_t) docs.size(); ++i) {
+        if (beg) { beg[i] = docs[i].beg; }
+        if (end) { end[i] = docs[i].end; }
+        if (k)   { k[i]   = docs[i].k;   }
+        if (w)   { w[i]   = docs[i].w;   }
+        if (fa)  { fa[i]  = docs[i].fa;  }
+    }
+    return (int32_t) docs.size();
+}
+
+int32_t llama_context::tokengate_seq_n_kept(llama_seq_id seq_id, llama_pos p) const {
+    if (seq_id < 0 || (size_t) seq_id >= tg_states.seqs.size() || !tg_states.seqs[seq_id].active) {
+        return p;
+    }
+    const auto & st = tg_states.seqs[seq_id];
+    return p >= st.n_prompt ? st.n_kept_before(p) : -1;
+}
+
+void llama_context::tokengate_extract_bottom(const llm_graph_result * res, const llama_ubatch & ubatch) {
+    ggml_tensor * t = res->get_embd();
+    GGML_ASSERT(t && t->ne[1] == ubatch.n_tokens && ggml_is_contiguous(t));
+
+    // the ubatches of the prefill hold consecutive positions of one sequence, from tg_a_pos0 on
+    const llama_pos p0 = ubatch.pos[0] - tg_a_pos0;
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        GGML_ASSERT(ubatch.pos[i] == ubatch.pos[0] + (llama_pos) i);
+    }
+
+    const int64_t n_out = t->ne[0];
+    GGML_ASSERT(p0 >= 0 && (size_t) (p0 + ubatch.n_tokens) * n_out <= tg_a.size());
+
+    ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t);
+    GGML_ASSERT(backend != nullptr);
+
+    ggml_backend_tensor_get_async(backend, t, tg_a.data() + (size_t) p0 * n_out, 0, ggml_nbytes(t));
+}
+
+void llama_context::tokengate_reset() {
+    if (!cparams.tokengate) {
+        return;
+    }
+
+    tokengate_set_phase(LLAMA_TG_PHASE_NONE);
+
+    tokengate_clear();
+    tg_kept.clear();
+    tg_kept_h.clear();
+}
+
+void llama_context::tokengate_reset_seq(llama_seq_id seq_id) {
+    if (seq_id >= 0 && (size_t) seq_id < tg_states.seqs.size()) {
+        tg_states.seqs[seq_id].clear();
+    }
+}
+
+bool llama_context::tokengate_active() const {
+    return cparams.tokengate && tg_states.any_active();
+}
+
+void llama_context::tokengate_set_fa(bool value) {
+    // split by heads (-sm tensor), the gated layers take the flash-attention form only: the gate bias coefficients
+    // are mirrored and cannot scale the split KQ of the exact form
+    cparams.tg_fa_mean = cparams.flash_attn && (value || model.split_mode() == LLAMA_SPLIT_MODE_TENSOR);
+}
+
+bool llama_context::tokengate_get_fa() const {
+    return cparams.tg_fa_mean;
+}
+
+void llama_context::tokengate_set_adapter(const llama_adapter_lora * adapter) {
+    cparams.tg_lora = adapter;
+}
+
+int32_t llama_context::tokengate_n_kept() const {
+    return (int32_t) tg_kept.size();
+}
+
+const llama_pos * llama_context::tokengate_kept() const {
+    return tg_kept.empty() ? nullptr : tg_kept.data();
+}
+
+const float * llama_context::tokengate_kept_h() const {
+    return tg_kept_h.empty() ? nullptr : tg_kept_h.data();
+}
+
+uint32_t llama_context::n_embd_out_ctx() const {
+    return model.hparams.n_embd_out() + (cparams.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM ? 1 : 0);
+}
+
 
 float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
     auto it = embd_seq.find(seq_id);
@@ -2097,6 +2647,11 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     output_swaps.clear();
     embd_batch_idxs.clear();
 
+    // TokenGate: a reserve (and anything else outside the ubatches) uses the graph of the running phase
+    if (cparams.tokengate) {
+        cparams.tg_phase = tg_prefill_phase;
+    }
+
     sched_reserve();
 
     bool did_optimize = false;
@@ -2106,8 +2661,20 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
     llama_memory_context_ptr mctx;
 
+    // TokenGate: the exact gated attention of a ubatch is [n_kv, n_ubatch, n_head] wide without flash attention:
+    // cap the ubatch to 512 tokens when any gated sequence decode is about to run, so the memory fits
+    uint32_t n_ubatch = cparams.n_ubatch;
+    if (cparams.tokengate && !cparams.tg_fa_mean && tg_prefill_phase == LLAMA_TG_PHASE_NONE && n_ubatch > 512) {
+        for (size_t s = 0; s < tg_states.seqs.size(); ++s) {
+            if (tg_states.seqs[s].active && balloc->seq_pos_min((llama_seq_id) s) >= 0) {
+                n_ubatch = 512;
+                break;
+            }
+        }
+    }
+
     while (true) {
-        mctx = memory->init_batch(*balloc, cparams.n_ubatch, embd_all);
+        mctx = memory->init_batch(*balloc, n_ubatch, embd_all);
         if (!mctx) {
             return -2;
         }
@@ -2200,6 +2767,15 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             n_outputs = n_outputs_new;
         }
 
+        // TokenGate: outside a prefill, a ubatch with a gated sequence takes the gated graph
+        if (cparams.tokengate && tg_prefill_phase == LLAMA_TG_PHASE_NONE) {
+            bool gated = false;
+            for (uint32_t s = 0; s < ubatch.n_seqs_unq && !gated; ++s) {
+                gated = tg_states.get(ubatch.seq_id_unq[s]) != nullptr;
+            }
+            cparams.tg_phase = gated ? LLAMA_TG_PHASE_DECODE : LLAMA_TG_PHASE_NONE;
+        }
+
         ggml_status status;
 
         const auto * res = process_ubatch(ubatch, ctx_type_to_graph_type(cparams.ctx_type), mctx.get(), status);
@@ -2239,6 +2815,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         //if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
+
+        if (cparams.tokengate && cparams.tg_phase == LLAMA_TG_PHASE_BOTTOM) {
+            tokengate_extract_bottom(res, ubatch);
+        }
 
         auto * t_logits  = res->get_logits();
         auto * t_embd    = cparams.embeddings       ? res->get_embd()     : nullptr;
@@ -4281,6 +4861,7 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
+        /*.tokengate                   =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
@@ -4304,6 +4885,12 @@ llama_context * llama_init_from_model(
 
     if (params.n_ctx == 0 && model->hparams.n_ctx_train == 0) {
         LLAMA_LOG_ERROR("%s: n_ctx and model->hparams.n_ctx_train cannot both be zero\n", __func__);
+        return nullptr;
+    }
+
+    if ((params.ctx_type == LLAMA_CONTEXT_TYPE_TG_BOTTOM || params.ctx_type == LLAMA_CONTEXT_TYPE_TG_TOP) &&
+            model->hparams.tg_gate_layer < 0) {
+        LLAMA_LOG_ERROR("%s: TokenGate context requested but the model has no gate\n", __func__);
         return nullptr;
     }
 
@@ -4522,6 +5109,94 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
     ctx->synchronize();
 
     return ctx->get_embeddings_seq(seq_id);
+}
+
+void llama_tokengate_set(llama_context * ctx, const llama_pos * pos, const float * qr, const float * kb, int32_t n) {
+    ctx->tokengate_set(pos, qr, kb, n);
+}
+
+void llama_tokengate_clear(llama_context * ctx) {
+    ctx->tokengate_clear();
+}
+
+int32_t llama_tokengate_prefill(
+        llama_context * ctx,
+         llama_seq_id   seq_id,
+    const llama_token * tokens,
+              int32_t   n_tokens,
+              int32_t   span_beg,
+              int32_t   span_end,
+              int32_t   k,
+              int32_t   w) {
+    return ctx->tokengate_prefill(seq_id, tokens, n_tokens, span_beg, span_end, k, w);
+}
+
+int32_t llama_tokengate_prefill_doc(
+        llama_context * ctx,
+         llama_seq_id   seq_id,
+    const llama_token * tokens,
+              int32_t   n_tokens,
+              int32_t   n_doc,
+              int32_t   k,
+              int32_t   w) {
+    return ctx->tokengate_prefill_doc(seq_id, tokens, n_tokens, n_doc, k, w);
+}
+
+int32_t llama_tokengate_seq_docs(
+        const llama_context * ctx,
+               llama_seq_id   seq_id,
+                    int32_t * beg,
+                    int32_t * end,
+                    int32_t * k,
+                    int32_t * w,
+                    int32_t * fa,
+                    int32_t   n_max) {
+    return ctx->tokengate_seq_docs(seq_id, beg, end, k, w, fa, n_max);
+}
+
+int32_t llama_tokengate_seq_n_kept(const llama_context * ctx, llama_seq_id seq_id, llama_pos pos) {
+    return ctx->tokengate_seq_n_kept(seq_id, pos);
+}
+
+void llama_tokengate_reset(llama_context * ctx) {
+    ctx->tokengate_reset();
+}
+
+void llama_tokengate_reset_seq(llama_context * ctx, llama_seq_id seq_id) {
+    ctx->tokengate_reset_seq(seq_id);
+}
+
+void llama_tokengate_set_adapter(llama_context * ctx, struct llama_adapter_lora * adapter) {
+    ctx->tokengate_set_adapter(adapter);
+}
+
+bool llama_tokengate_active(const llama_context * ctx) {
+    return ctx->tokengate_active();
+}
+
+bool llama_tokengate_enabled(const llama_context * ctx) {
+    return ctx->get_cparams().tokengate;
+}
+
+bool llama_tokengate_get_fa(const llama_context * ctx) {
+    return ctx->tokengate_get_fa();
+}
+
+void llama_tokengate_set_fa(llama_context * ctx, bool value) {
+    ctx->tokengate_set_fa(value);
+}
+
+int32_t llama_tokengate_n_kept(const llama_context * ctx) {
+    return ctx->tokengate_n_kept();
+}
+
+const llama_pos * llama_tokengate_kept(const llama_context * ctx) {
+    return ctx->tokengate_kept();
+}
+
+const float * llama_tokengate_kept_h(const llama_context * ctx) {
+    // the prefill synchronized after reading each batch
+    return ctx->tokengate_kept_h();
 }
 
 void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {

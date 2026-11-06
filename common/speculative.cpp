@@ -215,9 +215,18 @@ struct common_speculative_impl {
     // (optional) serialize/restore per-seq internal state (e.g. eagle3's deferred boundary).
     virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
     virtual void set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) {}
+
+    // TokenGate: the target prefilled the positions [pos0, pos1) of `prompt` with llama_tokengate_prefill() or
+    // llama_tokengate_prefill_doc() instead of decoding them, so process() never saw them; rebuild the state from the
+    // kept tokens. false if the implementation cannot follow a pruned prompt (it needs every prompt token through
+    // process()). The n-gram implementations only read the prompt tokens.
+    virtual bool tokengate_prefill(llama_seq_id /*seq_id*/, const llama_tokens & /*prompt*/, int32_t /*pos0*/, int32_t /*pos1*/) { return true; }
 };
 
 struct common_speculative_impl_draft_simple : public common_speculative_impl {
+    // the draft model needs every prompt token through process()
+    bool tokengate_prefill(llama_seq_id /*seq_id*/, const llama_tokens & /*prompt*/, int32_t /*pos0*/, int32_t /*pos1*/) override { return false; }
+
     common_params_speculative_draft params;
 
     common_batch batch;
@@ -514,6 +523,9 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
 //      in verify mode, have process() only stash features and let draft() seed run
 //      encoder+decoder on n_accepted+1 rows).
 struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
+    // the draft model needs every prompt token through process()
+    bool tokengate_prefill(llama_seq_id /*seq_id*/, const llama_tokens & /*prompt*/, int32_t /*pos0*/, int32_t /*pos1*/) override { return false; }
+
     common_params_speculative_draft params;
     common_batch batch;     // decoder input, (token, g_embd) pairs
     common_batch batch_enc; // encoder input, built from the extracted target features
@@ -982,6 +994,9 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
 
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
 struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+    // the draft model needs every prompt token through process()
+    bool tokengate_prefill(llama_seq_id /*seq_id*/, const llama_tokens & /*prompt*/, int32_t /*pos0*/, int32_t /*pos1*/) override { return false; }
+
     common_params_speculative_draft params;
 
     common_batch batch;        // noise tokens
@@ -2002,6 +2017,75 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
         std::memcpy(pending_h[seq_id].data(), data.data(), row_bytes);
     }
+
+    // the draft KV from the kept tokens of [pos0, pos1): the pair (x_{q+1}, h_q) at MTP position q + 1 for each kept q
+    // with q + 1 < pos1, and (x_pos0, h_{pos0-1}) after a prefix decoded as usual (its last hidden state is pending);
+    // the last kept hidden state pairs with the next decoded token; the positions in between stay empty, as in the
+    // target's upper half
+    bool tokengate_prefill(llama_seq_id seq_id, const llama_tokens & prompt, int32_t pos0, int32_t pos1) override {
+        auto * ctx_tgt = params.ctx_tgt;
+        auto * ctx_dft = params.ctx_dft;
+
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq || is_mem_shared || chain_heads) {
+            return false;
+        }
+
+        const int32_t     n_kept = llama_tokengate_n_kept(ctx_tgt);
+        const llama_pos * kept   = llama_tokengate_kept(ctx_tgt);
+        const float     * h      = llama_tokengate_kept_h(ctx_tgt);
+        if (n_kept <= 0 || !kept || !h) {
+            SPC_ERR("%s", "no TokenGate hidden states in the target context (unmasked nextn embeddings?)\n");
+            return false;
+        }
+        if (pos0 < 0 || pos1 > (int32_t) prompt.size() || pos0 >= pos1) {
+            SPC_ERR("invalid TokenGate region [%d, %d) of a %zu-token prompt\n", pos0, pos1, prompt.size());
+            return false;
+        }
+
+        llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, pos0, -1);
+
+        const int32_t n_batch = llama_n_batch(ctx_dft);
+
+        auto flush = [&]() {
+            if (batch.size() == 0) {
+                return true;
+            }
+            const int32_t rc = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+            batch.clear();
+            if (rc != 0) {
+                SPC_ERR("llama_process(ctx_dft) failed rc=%d\n", (int) rc);
+                return false;
+            }
+            return true;
+        };
+
+        batch.clear();
+        if (pos0 > 0) {
+            const int32_t idx = batch.add(prompt[pos0], pos0, seq_id, false);
+            batch.set_embd_state(idx, { pending_h[seq_id].data(), 1, (size_t) n_embd });
+        }
+        for (int32_t i = 0; i < n_kept; ++i) {
+            const llama_pos q = kept[i];
+            if (q + 1 >= pos1) {
+                break;
+            }
+            const int32_t idx = batch.add(prompt[q + 1], q + 1, seq_id, false);
+            batch.set_embd_state(idx, { h + (size_t) i * n_embd, 1, (size_t) n_embd });
+            if (batch.size() >= n_batch && !flush()) {
+                return false;
+            }
+        }
+        if (!flush()) {
+            return false;
+        }
+
+        std::memcpy(pending_h[seq_id].data(), h + (size_t) (n_kept - 1) * n_embd, (size_t) n_embd * sizeof(float));
+
+        verify_h_rows[seq_id] = 0;
+        verify_h[seq_id].clear();
+
+        return true;
+    }
 };
 
 // state of self-speculation (simple implementation, not ngram-map)
@@ -2710,6 +2794,7 @@ common_params common_base_params_to_speculative(const common_params & params) {
 
     result.embedding    = false;
     result.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
+    result.tokengate    = false; // the gate is a target-context feature
 
     if (has_draft) {
         // default to global devices value
@@ -3041,6 +3126,21 @@ bool common_speculative_process(common_speculative * spec, const common_batch & 
 
     for (auto & impl : spec->impls) {
         result = result && impl->process(batch);
+    }
+
+    return result;
+}
+
+bool common_speculative_tokengate_prefill(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt,
+        int32_t pos0, int32_t pos1) {
+    if (spec == nullptr) {
+        return true;
+    }
+
+    bool result = true;
+
+    for (auto & impl : spec->impls) {
+        result = impl->tokengate_prefill(seq_id, prompt, pos0, pos1) && result;
     }
 
     return result;

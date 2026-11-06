@@ -3815,6 +3815,67 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--tokengate"},
+        "prefill the document of long prompts through the model's TokenGate gate, keeping its best tokens only\n"
+        "(needs a gate in the model and a single slot; the document is marked by --tokengate-markers)",
+        [](common_params & params) {
+            params.tokengate = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE"));
+    add_opt(common_arg(
+        {"--tokengate-k"}, "N",
+        string_format("TokenGate: document tokens to keep (default: %d)", params.tokengate_k),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("--tokengate-k must be positive");
+            }
+            params.tokengate_k = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_K"));
+    add_opt(common_arg(
+        {"--tokengate-dilate"}, "W",
+        string_format("TokenGate: keep the +-W neighbours of each anchor token (default: %d)", params.tokengate_dilate),
+        [](common_params & params, int value) {
+            params.tokengate_dilate = std::max(0, value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_DILATE"));
+    add_opt(common_arg(
+        {"--tokengate-min-span"}, "N",
+        string_format("TokenGate: documents shorter than N tokens are prefilled whole (default: %d)", params.tokengate_min_span),
+        [](common_params & params, int value) {
+            params.tokengate_min_span = std::max(1, value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_MIN_SPAN"));
+    add_opt(common_arg(
+        {"--tokengate-markers"}, "OPEN,CLOSE[;OPEN,CLOSE...]",
+        "TokenGate: the strings around the document in the prompt (default: <context>,</context>;<document>,</document>)",
+        [](common_params & params, const std::string & value) {
+            params.tokengate_markers.clear();
+            for (const auto & pair : string_split<std::string>(value, ';')) {
+                const auto parts = string_split<std::string>(pair, ',');
+                if (parts.size() != 2 || parts[0].empty() || parts[1].empty()) {
+                    throw std::invalid_argument("--tokengate-markers: expected OPEN,CLOSE pairs separated by ';'");
+                }
+                params.tokengate_markers.emplace_back(parts[0], parts[1]);
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_MARKERS"));
+    add_opt(common_arg(
+        {"--tokengate-fa"},
+        "TokenGate: flash attention in the gated layers, with the head-mean of the per-head key bias (approximate, faster)",
+        [](common_params & params) {
+            params.tokengate_fa = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_FA"));
+    add_opt(common_arg(
+        {"--tokengate-lora"}, "FNAME",
+        "TokenGate: the gate's paired LoRA adapter, applied to the TokenGate requests only",
+        [](common_params & params, const std::string & value) {
+            params.tokengate_lora = (int32_t) params.lora_adapters.size();
+            params.lora_adapters.push_back({ value, 0.0f, "", "", nullptr });
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_LORA"));
+    add_opt(common_arg(
         {"--lora-init-without-apply"},
         string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
         [](common_params & params) {

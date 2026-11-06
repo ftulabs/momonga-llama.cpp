@@ -88,6 +88,32 @@ struct llama_context {
     float * get_embeddings_ith(int32_t i);
     float * get_embeddings_seq(llama_seq_id seq_id);
 
+    // TokenGate
+    void tokengate_set(const llama_pos * pos, const float * qr, const float * kb, int32_t n);
+    void tokengate_clear();
+
+    // TokenGate in a single context, see llama_tokengate_prefill() and llama_tokengate_prefill_doc()
+    int32_t tokengate_prefill(
+            llama_seq_id seq_id, const llama_token * tokens, int32_t n_tokens,
+            int32_t span_beg, int32_t span_end, int32_t k, int32_t w);
+    int32_t tokengate_prefill_doc(
+            llama_seq_id seq_id, const llama_token * tokens, int32_t n_tokens, int32_t n_doc, int32_t k, int32_t w);
+    int32_t tokengate_seq_docs(llama_seq_id seq_id, int32_t * beg, int32_t * end, int32_t * k, int32_t * w, int32_t * fa, int32_t n_max) const;
+    int32_t tokengate_seq_n_kept(llama_seq_id seq_id, llama_pos p) const;
+    void tokengate_reset();
+    void tokengate_reset_seq(llama_seq_id seq_id);
+    bool tokengate_active() const;
+    void tokengate_set_fa(bool value);
+    bool tokengate_get_fa() const;
+    void tokengate_set_adapter(const llama_adapter_lora * adapter);
+
+    int32_t           tokengate_n_kept() const;
+    const llama_pos * tokengate_kept()   const;
+    const float     * tokengate_kept_h() const;
+
+    // width of an output embedding row: the model's n_embd_out, +1 for the gate score in TG_BOTTOM contexts
+    uint32_t n_embd_out_ctx() const;
+
     float * get_embeddings_nextn();
     float * get_embeddings_nextn_ith(int32_t i);
 
@@ -311,6 +337,33 @@ private:
     const llama_model & model;
 
     llama_cparams cparams;
+
+    // TokenGate per-sequence, per-position tables (see llama_tokengate_set and llama_tokengate_prefill)
+    llama_tg_states tg_states;
+
+    // the phase of a running prefill (BOTTOM, TOP), NONE otherwise; outside a prefill each ubatch takes the gated
+    // graph (DECODE) when it holds a gated sequence, the plain one (NONE) otherwise
+    llama_tg_phase tg_prefill_phase = LLAMA_TG_PHASE_NONE;
+
+    // TokenGate in a single context: [a_j | raw gate score] of every prompt token (BOTTOM phase), the kept prompt
+    // positions of the last prefill and their hidden states
+    std::vector<float>     tg_a;
+    std::vector<llama_pos> tg_kept;
+    std::vector<float>     tg_kept_h;
+
+    llama_pos              tg_a_pos0 = 0; // the position of the first row of tg_a
+
+    // BOTTOM phase: copy the [a_j | score] rows of the ubatch into tg_a, by position
+    void tokengate_extract_bottom(const llm_graph_result * res, const llama_ubatch & ubatch);
+
+    // the prefill of the positions [pos0, pos0 + n_tokens) of seq_id, which holds the positions before pos0, with the
+    // document span [span_beg, span_end) inside them
+    int32_t tokengate_prefill_ext(
+            llama_seq_id seq_id, const llama_token * tokens, int32_t n_tokens, llama_pos pos0,
+            int32_t span_beg, int32_t span_end, int32_t k, int32_t w);
+
+    // switch the phase of the graph and of the memory
+    void tokengate_set_phase(llama_tg_phase phase);
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;

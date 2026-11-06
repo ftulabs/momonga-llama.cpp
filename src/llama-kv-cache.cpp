@@ -4,6 +4,7 @@
 #include "llama-io.h"
 #include "llama-model.h"
 #include "llama-context.h"
+#include "llama-tokengate.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1896,6 +1897,9 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T * 
 }
 
 void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const {
+    const uint32_t       eff_n_swa    = mask_window > 0 && swa_type == LLAMA_SWA_TYPE_NONE ? mask_window : n_swa;
+    const llama_swa_type eff_swa_type = mask_window > 0 && swa_type == LLAMA_SWA_TYPE_NONE ? LLAMA_SWA_TYPE_STANDARD : swa_type;
+
     // fill the cell rows of each slice
     if (attn_mask.rows && attn_mask.rows->buffer) {
         GGML_ASSERT(ggml_backend_buffer_is_host(attn_mask.rows->buffer));
@@ -1907,7 +1911,7 @@ void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const 
         const auto & cells = v_cells[0];
         int32_t * data = (int32_t *) attn_mask.rows->data;
 
-        cells.get_seq_cells(get_kv_rows_slices(*ubatch, n_slices, n_swa, swa_type), data, n_rows);
+        cells.get_seq_cells(get_kv_rows_slices(*ubatch, n_slices, eff_n_swa, eff_swa_type), data, n_rows);
     }
 
     // the mask is left unallocated when the graph only stores K/V without attending
@@ -1947,8 +1951,8 @@ void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const 
             /*.ubatch           =*/ ubatch,
             /*.v_cells          =*/ v_cells,
             /*.seq_to_stream    =*/ seq_to_stream,
-            /*.n_swa            =*/ n_swa,
-            /*.swa_type         =*/ swa_type,
+            /*.n_swa            =*/ eff_n_swa,
+            /*.swa_type         =*/ eff_swa_type,
             /*.n_kv             =*/ n_kv,
             /*.n_stream         =*/ n_stream,
             /*.n_tps            =*/ n_tps,
@@ -1989,6 +1993,45 @@ void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch 
 
                 data[h*(n_kv*n_tokens) + i*n_kv + j] = llama_relative_position_bucket(p0, ubatch->pos[i], hparams.n_rel_attn_bkts, false);
             }
+        }
+    }
+}
+
+void llama_kv_cache::set_input_tg_kbias(ggml_tensor * dst, const llama_ubatch * ubatch, const llama_tg_states & tg) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+
+    float * data = (float *) dst->data;
+
+    const int64_t n_kv         = dst->ne[0];
+    const int64_t n_stream_cur = dst->ne[3]; // streams of the ubatch, as in the KQ mask
+    const int64_t n_tps        = ubatch->n_tokens/n_stream_cur;
+
+    // the gated sequences of the ubatch: a cell of one of them takes its bias, any other cell none (a query only
+    // sees the cells of its own sequence; a gated sequence shares no cell)
+    std::vector<std::pair<llama_seq_id, const llama_tg_state *>> gated;
+    for (uint32_t s = 0; s < ubatch->n_seqs_unq; ++s) {
+        if (const auto * st = tg.get(ubatch->seq_id_unq[s])) {
+            gated.emplace_back(ubatch->seq_id_unq[s], st);
+        }
+    }
+
+    for (int64_t is = 0; is < n_stream_cur; ++is) {
+        const auto & cells = v_cells.at(seq_to_stream[ubatch->seq_id[is*n_tps][0]]);
+
+        float * row = data + is*n_kv;
+
+        for (int64_t j = 0; j < n_kv; ++j) {
+            float b = 0.0f;
+            // empty cells are masked out in the attention, their bias is irrelevant
+            if (!cells.is_empty(j)) {
+                for (const auto & [seq_id, st] : gated) {
+                    if (cells.seq_has(j, seq_id)) {
+                        b = st->get_kb(cells.pos_get(j));
+                        break;
+                    }
+                }
+            }
+            row[j] = b;
         }
     }
 }
@@ -3091,6 +3134,10 @@ void llama_kv_cache_context::set_input_attn_mask(const llm_attn_mask & attn_mask
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     kv->set_input_pos_bucket(dst, ubatch);
+}
+
+void llama_kv_cache_context::set_input_tg_kbias(ggml_tensor * dst, const llama_ubatch * ubatch, const llama_tg_states & tg) const {
+    kv->set_input_tg_kbias(dst, ubatch, tg);
 }
 
 void llama_kv_cache_context::get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const {

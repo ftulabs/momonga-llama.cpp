@@ -256,6 +256,18 @@ struct server_batch {
     }
 };
 
+// TokenGate: a marked document of a prompt, [beg, end) in tokens, with the gate's budget k and dilation w; gate: the
+// task prefills it through the gate (long enough), otherwise it is decoded as usual unless the memory already holds it
+// gated
+struct server_tg_doc {
+    int32_t beg  = 0;
+    int32_t end  = 0;
+    int32_t k    = 0;
+    int32_t w    = 0;
+    bool    gate = false;
+    bool    fa   = false; // the gated layers' flash-attention form
+};
+
 struct server_slot {
     int id;
 
@@ -339,6 +351,30 @@ struct server_slot {
     slot_state state = SLOT_STATE_IDLE;
 
     server_prompt prompt;
+
+    // TokenGate: the marked documents of the task's prompt, in order (tg_docs); the ones this task prefills through
+    // the gate (tg_plan, the next one at tg_next), each once the memory holds the prompt up to it; tg_allow: the task
+    // may take a gated document (a gated one in the memory is reused only then); the gate settings of the task
+    std::vector<server_tg_doc> tg_docs;
+    std::vector<server_tg_doc> tg_plan;
+    size_t  tg_next   = 0;
+    bool    tg_allow  = false;
+    bool    tg_fa     = false;
+    double  tg_t_ms   = 0.0;
+
+    // the documents of the task's prompt that the memory holds gated
+    std::vector<server_tg_doc> tokengate_mem_docs() const {
+        std::vector<server_tg_doc> res;
+        const int32_t n = llama_tokengate_seq_docs(ctx_tgt, id, nullptr, nullptr, nullptr, nullptr, nullptr, 0);
+        if (n > 0) {
+            std::vector<int32_t> beg(n), end(n), k(n), w(n), fa(n);
+            llama_tokengate_seq_docs(ctx_tgt, id, beg.data(), end.data(), k.data(), w.data(), fa.data(), n);
+            for (int32_t i = 0; i < n; ++i) {
+                res.push_back({ beg[i], end[i], k[i], w[i], true, fa[i] != 0 });
+            }
+        }
+        return res;
+    }
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
@@ -1095,6 +1131,9 @@ private:
 
     common_speculative_ptr spec;
 
+    // TokenGate prefill of long documents (--tokengate, and the context created the split memory)
+    bool tg_enabled = false;
+
     bool add_bos_token = true;
 
     int32_t n_ctx; // total context for all clients / slots
@@ -1519,6 +1558,45 @@ private:
             return false;
         }
 
+        // TokenGate: the draft models that need every prompt token cannot follow a pruned prefill, MTP and n-grams can
+        tg_enabled = false;
+        if (params_base.tokengate) {
+            bool spec_ok = true;
+            if (spec) {
+                for (const auto type : params_base.speculative.types) {
+                    spec_ok = spec_ok && (type == COMMON_SPECULATIVE_TYPE_NONE || type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP ||
+                            type == COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE || type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K ||
+                            type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V || type == COMMON_SPECULATIVE_TYPE_NGRAM_MOD ||
+                            type == COMMON_SPECULATIVE_TYPE_NGRAM_CACHE);
+                }
+            }
+
+            if (!llama_tokengate_enabled(ctx_tgt)) {
+                SRV_WRN("%s", "--tokengate: the context has no TokenGate memory (see the context log), TokenGate is off\n");
+            } else if (!spec_ok) {
+                SRV_WRN("%s", "--tokengate: only MTP and n-gram speculative decoding can follow it, TokenGate is off\n");
+            } else if (params_base.tokengate_lora < 0) {
+                SRV_WRN("%s", "--tokengate without --tokengate-lora: a gate trained with an adapter needs it\n");
+                tg_enabled = true;
+            } else {
+                tg_enabled = true;
+            }
+
+            if (tg_enabled) {
+                // the gate's adapter: on in every slot, applied by the context to the gated sequences only
+                if (params_base.tokengate_lora >= 0 && params_base.tokengate_lora < (int32_t) params_base.lora_adapters.size()) {
+                    auto & la = params_base.lora_adapters[params_base.tokengate_lora];
+                    llama_tokengate_set_adapter(ctx_tgt, la.ptr);
+                    la.scale = 1.0f;
+                }
+                // the gated layers' softmax form of the server default, until a task sets its own
+                llama_tokengate_set_fa(ctx_tgt, params_base.tokengate_fa);
+                SRV_INF("TokenGate on: gate layer %d, k = %d, dilate = %d, min document = %d tokens, adapter %d, %d slot(s)\n",
+                        llama_model_tokengate_layer(model_tgt), params_base.tokengate_k, params_base.tokengate_dilate,
+                        params_base.tokengate_min_span, params_base.tokengate_lora, params_base.n_parallel);
+            }
+        }
+
         for (int i = 0; i < params_base.n_parallel; i++) {
             server_slot & slot = slots[i];
 
@@ -1818,6 +1896,9 @@ private:
         // find the slot that has at least n% prompt similarity
         if (slot_prompt_similarity != 0.0f) {
             float f_sim_best = 0;
+            size_t lcp_best = 0;
+
+            const int64_t n_tg_doc = tokengate_doc_tokens(task);
 
             for (server_slot & slot : slots) {
                 if (task.id_slot != -1 && slot.id != task.id_slot) {
@@ -1838,22 +1919,24 @@ private:
                     continue;
                 }
 
-                // fraction of the Longest Common Prefix length with respect to the input prompt length
+                // fraction of the Longest Common Prefix length with respect to the input prompt length (without the
+                // documents a TokenGate prompt gates: they are cheap to redo, its prefix is what the cache saves)
                 const size_t lcp_len = tokens.get_common_prefix(task.tokens);
-                const float f_sim_cur = float(lcp_len) / task.tokens.size();
+                const float f_sim_cur = float(lcp_len) / std::max<int64_t>(1, (int64_t) task.tokens.size() - n_tg_doc);
 
                 SLT_TRC(slot, " - checking sim = %.3f (%zu/%zu) > %.3f\n", f_sim_cur, lcp_len, task.tokens.size(), slot_prompt_similarity);
 
                 // select the current slot if the criteria match
                 if (f_sim_cur > f_sim_best && f_sim_cur > slot_prompt_similarity) {
                     f_sim_best = f_sim_cur;
+                    lcp_best   = lcp_len;
 
                     ret = &slot;
                 }
             }
 
             if (ret != nullptr) {
-                const float f_keep = (f_sim_best*task.tokens.size()) / ret->prompt.tokens.size();
+                const float f_keep = float(lcp_best) / ret->prompt.tokens.size();
 
                 if (task.id_slot == -1) {
                     SLT_INF(*ret, "selected slot by LCP similarity, f_sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
@@ -1951,6 +2034,314 @@ private:
         return output;
     }
 
+    // TokenGate: the documents of a prompt in tokens, in order: each from the first token after an opening marker to
+    // the last one before the next matching closing marker (a token that straddles a marker stays outside); empty if
+    // no marker pair is found or the prompt has media
+    std::vector<std::pair<int32_t, int32_t>> tokengate_find_spans(const server_tokens & tokens) const {
+        const int32_t n = (int32_t) tokens.size();
+
+        std::vector<std::pair<int32_t, int32_t>> res;
+
+        // the text of the prompt and the character offset of each token
+        std::string text;
+        std::vector<size_t> off(n + 1);
+        for (int32_t i = 0; i < n; ++i) {
+            off[i] = text.size();
+            if (tokens[i] == LLAMA_TOKEN_NULL) {
+                return res; // multimodal chunk
+            }
+            text += common_token_to_piece(ctx_tgt, tokens[i], true);
+        }
+        off[n] = text.size();
+
+        for (const auto & [open, close] : params_base.tokengate_markers) {
+            size_t from = 0;
+            while (true) {
+                const size_t a = text.find(open, from);
+                if (a == std::string::npos) {
+                    break;
+                }
+                const size_t b = text.find(close, a + open.size());
+                if (b == std::string::npos) {
+                    break;
+                }
+                const int32_t beg = (int32_t) (std::lower_bound(off.begin(), off.end(), a + open.size()) - off.begin());
+                const int32_t end = (int32_t) (std::upper_bound(off.begin(), off.end(), b) - off.begin()) - 1;
+                if (end > beg) {
+                    res.emplace_back(beg, end);
+                }
+                from = b + close.size();
+            }
+        }
+
+        // only markers and whitespace between two documents (a client that wraps each file or chunk on its own)
+        auto only_markers = [&](int32_t a, int32_t b) {
+            std::string gap = text.substr(off[a], off[b] - off[a]);
+            for (const auto & [open, close] : params_base.tokengate_markers) {
+                for (const std::string * m : { &open, &close }) {
+                    for (size_t p; !m->empty() && (p = gap.find(*m)) != std::string::npos; ) {
+                        gap.erase(p, m->size());
+                    }
+                }
+            }
+            return std::all_of(gap.begin(), gap.end(), [](unsigned char c) { return std::isspace(c); });
+        };
+
+        // the documents of several marker kinds in order, the first of two overlapping ones wins; documents with only
+        // markers between them are one document
+        std::sort(res.begin(), res.end());
+        std::vector<std::pair<int32_t, int32_t>> out;
+        for (const auto & d : res) {
+            if (out.empty()) {
+                out.push_back(d);
+            } else if (d.first >= out.back().second) {
+                if (only_markers(out.back().second, d.first)) {
+                    out.back().second = d.second;
+                } else {
+                    out.push_back(d);
+                }
+            }
+        }
+
+        return out;
+    }
+
+    // TokenGate: the document tokens of a task that the gate would take (for the slot choice), 0 without TokenGate
+    int64_t tokengate_doc_tokens(const server_task & task) const {
+        if (!tg_enabled || task.params.tokengate == 0 || task.type != SERVER_TASK_TYPE_COMPLETION ||
+            task.is_parent() || task.is_child() || task.tokens.size() == 0 || task.tokens.has_mtmd) {
+            return 0;
+        }
+        const int32_t k = task.params.tokengate_k > 0 ? task.params.tokengate_k : params_base.tokengate_k;
+        int64_t n = 0;
+        for (const auto & [b, e] : tokengate_find_spans(task.tokens)) {
+            if (e - b > k && (task.params.tokengate == 1 || e - b >= params_base.tokengate_min_span)) {
+                n += e - b;
+            }
+        }
+        return n;
+    }
+
+    // decide which documents of the task may go through the gate, see --tokengate and the per-request "tokengate"
+    void tokengate_plan(server_slot & slot, const server_task & task) const {
+        slot.tg_docs.clear();
+        slot.tg_plan.clear();
+        slot.tg_next  = 0;
+        slot.tg_allow = false;
+        slot.tg_t_ms  = 0.0;
+
+        if (!tg_enabled || task.params.tokengate == 0) {
+            return;
+        }
+
+        const bool forced = task.params.tokengate == 1;
+
+        const char * why = nullptr;
+        std::vector<std::pair<int32_t, int32_t>> spans;
+        if (task.type != SERVER_TASK_TYPE_COMPLETION || task.is_parent() || task.is_child()) {
+            why = "not a single completion";
+        } else if (task.tokens.size() > 0 &&
+                   (task.tokens[0] == LLAMA_TOKEN_NULL || task.tokens.find_next_media_chunk(0).first != nullptr)) {
+            // has_mtmd only says that the prompt went through the multimodal tokenizer (--mmproj)
+            why = "the prompt has images or audio";
+        } else if (task.params.sampling.backend_sampling) {
+            why = "backend sampling";
+        } else if ((spans = tokengate_find_spans(task.tokens)).empty()) {
+            why = "no document markers";
+        }
+
+        if (why) {
+            if (forced) {
+                SLT_WRN(slot, "TokenGate requested but not used: %s\n", why);
+            }
+            return;
+        }
+
+        slot.tg_allow = true;
+
+        const int32_t k = task.params.tokengate_k > 0 ? task.params.tokengate_k : params_base.tokengate_k;
+        const int32_t w = task.params.tokengate_dilate >= 0 ? task.params.tokengate_dilate : params_base.tokengate_dilate;
+
+        // the last prompt token is decoded as usual (its logits)
+        const int32_t n_tokens = task.n_tokens();
+
+        int32_t n_gate = 0;
+        for (const auto & [b, e0] : spans) {
+            const int32_t e = std::min(e0, n_tokens - 1);
+            if (e <= b) {
+                continue;
+            }
+            const bool gate = e - b > k && (forced || e - b >= params_base.tokengate_min_span);
+            slot.tg_docs.push_back({ b, e, k, w, gate });
+            n_gate += gate;
+        }
+
+        slot.tg_fa = task.params.tokengate_fa >= 0 ? task.params.tokengate_fa == 1 : params_base.tokengate_fa;
+
+        // the softmax form of the gated layers is one per context: the task's, from its first batch on (a reused
+        // gated document must have been prefilled in the same form, see tokengate_reusable)
+        llama_tokengate_set_fa(ctx_tgt, slot.tg_fa);
+
+        if (n_gate == 0 && forced) {
+            SLT_WRN(slot, "TokenGate requested but not used: %s\n", "no document is longer than k (and --tokengate-min-span)");
+        }
+    }
+
+    // TokenGate: how much of the cached prompt (n_past tokens) the task can keep, so that its result is the one of a
+    // prefill from scratch: a gated document in the memory is kept only if the task gates the same document the same
+    // way (k, dilation, flash-attention form); a document the task gates is gated whole, so a cached prompt that holds
+    // it otherwise (plain, cut, or gated differently) goes back to its start
+    int tokengate_reusable(const server_slot & slot, int n_past) const {
+        const auto mem = slot.tokengate_mem_docs();
+        const bool fa  = llama_tokengate_get_fa(ctx_tgt);
+
+        auto served = [&](const server_tg_doc & g) {
+            for (const auto & d : slot.tg_docs) {
+                if (d.gate && d.beg == g.beg && d.end == g.end && d.k == g.k && d.w == g.w && g.fa == fa) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        int res = n_past;
+        for (bool changed = true; changed; ) {
+            changed = false;
+            for (const auto & g : mem) {
+                if (res > g.beg && (res < g.end || !served(g))) {
+                    SLT_INF(slot, "TokenGate: the cached gated document [%d, %d) does not serve this prompt, reprocessing from %d\n",
+                            g.beg, g.end, g.beg);
+                    res = g.beg;
+                    changed = true;
+                    break;
+                }
+            }
+            for (const auto & d : slot.tg_docs) {
+                if (!d.gate || d.beg >= res) {
+                    continue;
+                }
+                bool gated = false;
+                for (const auto & g : mem) {
+                    gated = gated || (g.beg == d.beg && g.end == d.end && g.end <= res && served(g));
+                }
+                if (!gated) {
+                    res = d.beg;
+                    changed = true;
+                }
+            }
+        }
+
+        return res;
+    }
+
+    // TokenGate: the documents of the task to prefill through the gate, once n_past tokens of the prompt are cached
+    void tokengate_plan_prefill(server_slot & slot, int n_past) {
+        slot.tg_plan.clear();
+        slot.tg_next = 0;
+
+        int32_t n_cached = 0;
+        for (const auto & g : slot.tokengate_mem_docs()) {
+            n_cached += g.end <= n_past;
+        }
+        for (const auto & d : slot.tg_docs) {
+            if (d.gate && d.beg >= n_past) {
+                slot.tg_plan.push_back(d);
+            }
+        }
+
+        slot.stats.tg_n_cached = n_cached;
+
+        if (!slot.tg_plan.empty() || n_cached > 0) {
+            SLT_INF(slot, "TokenGate: %zu document(s) in the prompt, %d gated one(s) from the cache, %zu to prefill through the gate (k = %d, dilate = %d%s)\n",
+                    slot.tg_docs.size(), n_cached, slot.tg_plan.size(),
+                    slot.tg_plan.empty() ? 0 : slot.tg_plan[0].k, slot.tg_plan.empty() ? 0 : slot.tg_plan[0].w,
+                    slot.tg_fa ? ", flash attention" : "");
+        }
+    }
+
+    // prefill a document through the gate, with the prompt after it up to r_end (the next document, or the last prompt
+    // token, which is decoded with the batch as usual); the memory holds the prompt up to the document
+    bool tokengate_prefill_doc(server_slot & slot, const server_tg_doc & doc, int32_t r_end) {
+        const auto & input_tokens = slot.task->tokens;
+        GGML_ASSERT(slot.prompt.n_tokens() == doc.beg && doc.end <= r_end);
+
+        const int32_t n = r_end - doc.beg;
+
+        llama_tokens tokens(n);
+        for (int32_t i = 0; i < n; ++i) {
+            tokens[i] = input_tokens[doc.beg + i];
+        }
+
+        // the batch of this iteration gets its adapters after this: the prefill needs the gate's adapter now
+        common_set_adapter_lora(ctx_tgt, slot.lora);
+        llama_set_embeddings(ctx_tgt, false);
+        llama_tokengate_set_fa(ctx_tgt, slot.tg_fa);
+
+        metrics_pre_decode();
+
+        const int64_t t_start = ggml_time_us();
+
+        int32_t ret = 0;
+        queue_tasks.yield_to_queue([&]() {
+            ret = llama_tokengate_prefill_doc(ctx_tgt, slot.id, tokens.data(), n, doc.end - doc.beg, doc.k, doc.w);
+        });
+        if (ret != 0) {
+            SLT_ERR(slot, "llama_tokengate_prefill_doc() failed: %d\n", ret);
+            slot.mem.seq_rm(slot.id, -1, -1);
+            return false;
+        }
+
+        if (spec && slot.can_speculate()) {
+            // the draft reads the prompt tokens up to the end of the prefill
+            llama_tokens prompt(r_end);
+            for (int32_t i = 0; i < r_end; ++i) {
+                prompt[i] = input_tokens[i];
+            }
+
+            bool ok = true;
+            queue_tasks.yield_to_queue([&]() {
+                ok = common_speculative_tokengate_prefill(spec.get(), slot.id, prompt, doc.beg, r_end);
+            });
+            if (!ok) {
+                SLT_ERR(slot, "%s", "the speculative decoding cannot follow a TokenGate prefill\n");
+                slot.mem.seq_rm(slot.id, -1, -1);
+                return false;
+            }
+        }
+
+        for (int32_t i = 0; i < n; ++i) {
+            slot.prompt.tokens.push_back(tokens[i]);
+        }
+
+        const double t_ms = (ggml_time_us() - t_start) / 1000.0;
+        slot.tg_t_ms += t_ms;
+
+        metrics_queue_prompt(n);
+        slot.stats.n_prompt_processed += n;
+        slot.stats.update_prompt_last();
+
+        SLT_INF(slot, "TokenGate prefill: document [%d, %d) -> %d of %d tokens kept, with the prompt up to %d, %.1f ms\n",
+                doc.beg, doc.end, llama_tokengate_n_kept(ctx_tgt) - (r_end - doc.end), doc.end - doc.beg, r_end, t_ms);
+
+        return true;
+    }
+
+    // TokenGate: the gated documents of the prompt and the prompt tokens the gated layers see
+    void tokengate_stats(server_slot & slot) const {
+        const auto mem = slot.tokengate_mem_docs();
+        if (mem.empty()) {
+            slot.stats.tg_n_doc  = 0;
+            slot.stats.tg_n_kept = -1;
+            return;
+        }
+        int32_t n_doc = 0;
+        for (const auto & g : mem) {
+            n_doc += g.end - g.beg;
+        }
+        slot.stats.tg_n_doc  = n_doc;
+        slot.stats.tg_n_kept = llama_tokengate_seq_n_kept(ctx_tgt, slot.id, slot.prompt.n_tokens());
+    }
+
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
@@ -2020,6 +2411,14 @@ private:
         if (!task.tokens.validate(ctx_tgt)) {
             send_error(task, "Prompt contains invalid tokens", ERROR_TYPE_INVALID_REQUEST);
             return false;
+        }
+
+        // TokenGate: the document span of a long prompt; the gate's adapter stays on in every slot (the context applies
+        // it to the gated sequences only), so all slots share one adapter set unless a request sets its scale
+        tokengate_plan(slot, task);
+        if (tg_enabled && params_base.tokengate_lora >= 0 && params_base.tokengate_lora < (int32_t) slot.lora.size() &&
+                task.params.lora.find(params_base.tokengate_lora) == task.params.lora.end()) {
+            slot.lora[params_base.tokengate_lora].scale = 1.0f;
         }
 
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
@@ -3784,6 +4183,13 @@ private:
                 return;
             }
             if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+                if (!slot.tokengate_mem_docs().empty()) {
+                    // the gated layers key their softmax on the token positions
+                    send_error(slot, "context shift is not supported with TokenGate", ERROR_TYPE_SERVER);
+                    slot.release();
+                    return;
+                }
+
                 if (!params_base.ctx_shift) {
                     // this check is redundant (for good)
                     // we should never get here, because generation should already stopped in process_token()
@@ -4202,6 +4608,13 @@ private:
                                 n_past = 0;
                             }
 
+                            // TokenGate: a gated document in the memory serves only a prompt that gates the same
+                            // document the same way, and a document the prompt gates is gated whole; otherwise the
+                            // prompt is reprocessed from before the document (a checkpoint there makes that cheap)
+                            if (tg_enabled) {
+                                n_past = tokengate_reusable(slot, n_past);
+                            }
+
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
 
                             // number of cached tokens shared with the new prompt, before any checkpoint is restored
@@ -4349,6 +4762,11 @@ private:
 
                         slot.prompt.tokens.keep_first(n_past);
 
+                        // TokenGate: the documents to prefill through the gate, the cached gated ones are reused
+                        if (tg_enabled) {
+                            tokengate_plan_prefill(slot, n_past);
+                        }
+
                         // this is to signal the client that the request has started processing
                         if (slot.task->params.stream) {
                             if (slot.task->params.return_progress) {
@@ -4478,6 +4896,30 @@ private:
                         has_mtmd = true;
                     }
 
+                    // TokenGate: each planned document through the gate once the memory holds the prompt up to it,
+                    // after a checkpoint of the state before it (the next prompt that does not continue this one
+                    // rolls back there); the last prompt token is decoded below, through both halves
+                    while (slot.tg_next < slot.tg_plan.size() && slot.prompt.n_tokens() == slot.tg_plan[slot.tg_next].beg) {
+                        if (do_checkpoint) {
+                            const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+                            const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+                            if (pos_min >= 0) {
+                                create_checkpoint(slot, 0, pos_min, pos_max);
+                            }
+                        }
+                        // the prompt after the document goes with it, up to the next document or the last token
+                        const int32_t r_end = slot.tg_next + 1 < slot.tg_plan.size() ?
+                            slot.tg_plan[slot.tg_next + 1].beg : slot.task->n_tokens() - 1;
+                        if (!tokengate_prefill_doc(slot, slot.tg_plan[slot.tg_next], r_end)) {
+                            // the sequence was cleared
+                            slot.prompt.clear();
+                            send_error(slot, "TokenGate prefill failed", ERROR_TYPE_SERVER);
+                            slot.release();
+                            return;
+                        }
+                        slot.tg_next++;
+                    }
+
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
 
@@ -4493,6 +4935,11 @@ private:
 
                         // stop at the end of the shared prefix, the children are started from this state
                         if (wait_shared && slot.prompt.n_tokens() == slot.task->n_tokens_shared) {
+                            break;
+                        }
+
+                        // TokenGate: stop at the next document, it goes through the gate with the next batch
+                        if (slot.tg_next < slot.tg_plan.size() && slot.prompt.n_tokens() == slot.tg_plan[slot.tg_next].beg) {
                             break;
                         }
 
@@ -4567,6 +5014,10 @@ private:
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
                         slot.state = SLOT_STATE_DONE_PROMPT;
+
+                        if (tg_enabled) {
+                            tokengate_stats(slot);
+                        }
 
                         GGML_ASSERT(batch.size() > 0);
 
