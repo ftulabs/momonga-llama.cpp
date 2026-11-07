@@ -1172,6 +1172,40 @@ float * llama_context::get_logits() {
     return logits.data;
 }
 
+const llama_outputs * llama_context::get_outputs() {
+    synchronize();
+    output_reorder();
+
+    outputs.vocab = &model.vocab;
+    outputs.n_vocab = model.vocab.n_tokens();
+    outputs.embeddings = embd.data;
+    outputs.embeddings_nextn = embd_nextn.data;
+    outputs.output_ids = &output_ids;
+    outputs.n_embd = model.hparams.n_embd_out();
+    outputs.n_embeddings_nextn = embd_nextn.size / (outputs.n_embd ? outputs.n_embd : 1);
+    outputs.embeddings_nextn_masked = cparams.embeddings_nextn_masked;
+
+    outputs.sampling.resize(n_outputs);
+    for (uint32_t row = 0; row < n_outputs; ++row) {
+        const int32_t idx = (int32_t) row - (int32_t) n_outputs;
+        auto & output = outputs.sampling[row];
+        output.token = get_sampled_token_ith(idx);
+        output.probs = get_sampled_probs_ith(idx);
+        output.sampled_logits = get_sampled_logits_ith(idx);
+        output.candidates = get_sampled_candidates_ith(idx);
+        output.n_probs = (uint32_t) get_sampled_probs_count(idx);
+        output.n_logits = (uint32_t) get_sampled_logits_count(idx);
+        output.logits = !output.sampled_logits && logits.has_data() ? get_logits_ith(idx) : nullptr;
+    }
+
+    outputs.embeddings_layer_inp.resize(embd_layer_inp.size());
+    for (uint32_t lid = 0; lid < embd_layer_inp.size(); ++lid) {
+        outputs.embeddings_layer_inp[lid] = embd_layer_inp[lid].has_data() ? get_embeddings_layer_inp(lid) : nullptr;
+    }
+
+    return &outputs;
+}
+
 int64_t llama_context::output_resolve_row(int32_t i) const {
     int64_t j = -1;
 
@@ -5225,6 +5259,10 @@ void llama_set_warmup(llama_context * ctx, bool warmup) {
 
 void llama_synchronize(llama_context * ctx) {
     ctx->synchronize();
+}
+
+const llama_outputs * llama_get_outputs(llama_context * ctx) {
+    return ctx->get_outputs();
 }
 
 float * llama_get_logits(llama_context * ctx) {

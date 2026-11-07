@@ -11,6 +11,7 @@
 #include "sampling.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
+#include "../src/llama-sampler.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1802,8 +1803,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             verify_h_rows[seq_id] = h_rows;
             verify_h[seq_id].resize((size_t) h_rows * n_embd);
 
+            const auto * outputs = llama_get_outputs(ctx_tgt);
             for (int32_t i = 0; i < h_rows; ++i) {
-                const float * h = llama_get_embeddings_nextn_ith(ctx_tgt, h_offset + i);
+                const float * h = outputs->get_embeddings_nextn_ith(h_offset + i);
                 std::memcpy(verify_h[seq_id].data() + (size_t) i * n_embd, h, row_bytes);
             }
 
@@ -1887,6 +1889,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             // whole prefix at the next head. dropped sequences are simply not re-added.
             batch.clear();
 
+            const auto * outputs = llama_get_outputs(ctx_dft);
+
             for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
                 if (!drafting[seq_id]) {
                     continue;
@@ -1894,8 +1898,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
                 auto * smpl = smpls[seq_id].get();
 
-                const llama_token id_sampled = common_sampler_sample(smpl, ctx_dft, i_last[seq_id], true);
-                const float * h_row = llama_get_embeddings_nextn_ith(ctx_dft, i_last[seq_id]);
+                const llama_token id_sampled = common_sampler_sample_from_outputs(smpl, outputs, i_last[seq_id], true);
+                const float * h_row = outputs->get_embeddings_nextn_ith(i_last[seq_id]);
 
                 const auto * cur_p = common_sampler_get_candidates(smpl, true);
 

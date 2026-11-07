@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+struct llama_outputs;
+
 // common_sampler extends llama_sampler with additional functionality:
 //
 //  - grammar support
@@ -66,6 +68,8 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
 // useful in cases where all the resulting candidates (not just the sampled one) must fit the grammar
 //
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first = false);
+
+llama_token common_sampler_sample_from_outputs(struct common_sampler * gsmpl, const struct llama_outputs * outputs, int idx, bool grammar_first = false);
 
 // generalized version of common_sampler_sample
 //

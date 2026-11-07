@@ -3847,6 +3847,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_MIN_SPAN"));
     add_opt(common_arg(
+        {"--tokengate-auto"},
+        "TokenGate: automatically gate prompts >= min-span when no document markers are found (default: enabled)",
+        [](common_params & params) {
+            params.tokengate_auto = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOKENGATE_AUTO"));
+    add_opt(common_arg(
+        {"--no-tokengate-auto"},
+        "TokenGate: disable automatic gating of unmarked prompts",
+        [](common_params & params) {
+            params.tokengate_auto = false;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--tokengate-markers"}, "OPEN,CLOSE[;OPEN,CLOSE...]",
         "TokenGate: the strings around the document in the prompt (default: <context>,</context>;<document>,</document>)",
         [](common_params & params, const std::string & value) {

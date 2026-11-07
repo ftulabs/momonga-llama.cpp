@@ -654,6 +654,7 @@ struct common_params {
     int32_t tokengate_min_span  = 3072;  // shorter documents are prefilled whole
     int32_t tokengate_lora      = -1;    // index in lora_adapters of the gate's paired adapter, -1 = none
     bool    tokengate_fa        = false; // gated layers with flash attention and the head-mean key bias (approximate)
+    bool    tokengate_auto      = true;  // auto-gate prompts >= min-span when no markers are found
     // the document is the text between the first opening marker and the last matching closing marker
     std::vector<std::pair<std::string, std::string>> tokengate_markers = {
         { "<context>",  "</context>"  }, // Open WebUI RAG template

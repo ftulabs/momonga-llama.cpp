@@ -2114,7 +2114,14 @@ private:
         }
         const int32_t k = task.params.tokengate_k > 0 ? task.params.tokengate_k : params_base.tokengate_k;
         int64_t n = 0;
-        for (const auto & [b, e] : tokengate_find_spans(task.tokens)) {
+        auto spans = tokengate_find_spans(task.tokens);
+        if (spans.empty() && params_base.tokengate_auto) {
+            const int32_t n_doc = task.n_tokens() - 1;
+            if (n_doc > k && (task.params.tokengate == 1 || n_doc >= params_base.tokengate_min_span)) {
+                spans.emplace_back(0, n_doc);
+            }
+        }
+        for (const auto & [b, e] : spans) {
             if (e - b > k && (task.params.tokengate == 1 || e - b >= params_base.tokengate_min_span)) {
                 n += e - b;
             }
@@ -2145,7 +2152,13 @@ private:
             // has_mtmd only says that the prompt went through the multimodal tokenizer (--mmproj)
             why = "the prompt has images or audio";
         } else if ((spans = tokengate_find_spans(task.tokens)).empty()) {
-            why = "no document markers";
+            const int32_t k = task.params.tokengate_k > 0 ? task.params.tokengate_k : params_base.tokengate_k;
+            const int32_t n_doc = task.n_tokens() - 1;
+            if (params_base.tokengate_auto && n_doc > k && (forced || n_doc >= params_base.tokengate_min_span)) {
+                spans.emplace_back(0, n_doc);
+            } else {
+                why = "no document markers";
+            }
         }
 
         if (why) {
