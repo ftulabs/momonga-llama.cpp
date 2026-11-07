@@ -2144,8 +2144,6 @@ private:
                    (task.tokens[0] == LLAMA_TOKEN_NULL || task.tokens.find_next_media_chunk(0).first != nullptr)) {
             // has_mtmd only says that the prompt went through the multimodal tokenizer (--mmproj)
             why = "the prompt has images or audio";
-        } else if (task.params.sampling.backend_sampling) {
-            why = "backend sampling";
         } else if ((spans = tokengate_find_spans(task.tokens)).empty()) {
             why = "no document markers";
         }
