@@ -134,6 +134,8 @@ separate 115 MB launches, not one fused one - so neither the dot nor the bandwid
 
 ## Build
 
+Run `./build-best.sh` to configure and build all production targets (`llama-server`, `llama-cli`, `llama-quantize`, `llama-tokengate`) with verified flags, or configure manually:
+
 ```sh
 cmake -S . -B build-volta -DCMAKE_BUILD_TYPE=Release \
   -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=72 \

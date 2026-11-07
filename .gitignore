@@ -86,6 +86,7 @@
 /tools/server/*.mjs.hpp
 /tools/server/*.gz.hpp
 !/build_64.sh
+!/build-best.sh
 !/examples/*.bat
 !/examples/*/*.kts
 !/examples/*/*/*.kts
