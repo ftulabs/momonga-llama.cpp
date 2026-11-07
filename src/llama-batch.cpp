@@ -1185,8 +1185,22 @@ size_t llama_batch_ext_select_n_embd_state(llama_context_type ctx_type, const ll
     return 0;
 }
 
+static size_t get_tg_ubatch_size() {
+    static const size_t ubatch = []() {
+        const char * env = getenv("TG_UBATCH");
+        if (env) {
+            int v = atoi(env);
+            if (v > 0) {
+                return (size_t) v;
+            }
+        }
+        return (size_t) 512;
+    }();
+    return ubatch;
+}
+
 llama_batch_ext::llama_batch_ext(llama_context * ctx) :
-        n_tokens_max(llama_n_batch(ctx)),
+        n_tokens_max(ctx->get_cparams().tokengate ? std::max<size_t>(llama_n_batch(ctx), get_tg_ubatch_size()) : llama_n_batch(ctx)),
         n_embd_inp(llama_batch_ext_select_n_embd_inp(ctx->get_cparams().ctx_type, llama_get_model(ctx)->arch, llama_get_model(ctx)->hparams)),
         n_embd_inp_enc(llama_get_model(ctx)->hparams.n_embd_inp_enc()),
         n_embd_state(llama_batch_ext_select_n_embd_state(ctx->get_cparams().ctx_type, llama_get_model(ctx)->hparams)),

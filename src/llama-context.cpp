@@ -839,6 +839,20 @@ void llama_context::sched_new(size_t max_nodes, bool parallel) {
     ggml_backend_sched_set_realloc_callback(sched.get(), sched_graph_realloc, this);
 }
 
+static int32_t get_tg_ubatch() {
+    static const int32_t ubatch = []() {
+        const char * env = getenv("TG_UBATCH");
+        if (env) {
+            int v = atoi(env);
+            if (v > 0) {
+                return v;
+            }
+        }
+        return 512;
+    }();
+    return ubatch;
+}
+
 void llama_context::sched_reserve() {
     if (!sched_need_reserve) {
         return;
@@ -853,7 +867,8 @@ void llama_context::sched_reserve() {
     const int64_t t_start_us = ggml_time_us();
 
     const uint32_t n_seqs = cparams.n_seq_max;
-    const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
+    const uint32_t n_tokens = std::min(cparams.n_ctx,
+        cparams.tokengate ? std::max<uint32_t>(cparams.n_ubatch, (uint32_t) get_tg_ubatch()) : cparams.n_ubatch);
 
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
 
@@ -1120,7 +1135,8 @@ bool llama_context::memory_update(bool optimize) {
         }
 
         const uint32_t n_seqs = cparams.n_seq_max;
-        const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
+        const uint32_t n_tokens = std::min(cparams.n_ctx,
+            cparams.tokengate ? std::max<uint32_t>(cparams.n_ubatch, (uint32_t) get_tg_ubatch()) : cparams.n_ubatch);
 
         const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
 
@@ -1446,7 +1462,8 @@ int32_t llama_context::tokengate_prefill_ext(
 
     // phase 1: the bottom half over the new positions; decode() copies [a_j | score] of every token into tg_a (no
     // outputs: the output buffer is sized for logits, and a server caps the outputs per batch)
-    tg_a.assign((size_t) (stream ? std::min<int32_t>(cparams.n_batch, n_tokens) : n_tokens) * n_out, 0.0f);
+    const int32_t n_batch_bottom = get_tg_ubatch();
+    tg_a.assign((size_t) (stream ? std::min<int32_t>(n_batch_bottom, n_tokens) : n_tokens) * n_out, 0.0f);
     tg_a_pos0 = pos0;
     if (stream) {
         row_slot.assign(n_tokens, -1);
@@ -1455,7 +1472,7 @@ int32_t llama_context::tokengate_prefill_ext(
         tokengate_set_phase(LLAMA_TG_PHASE_BOTTOM);
         cparams.embeddings = false;
 
-        const int32_t n_batch = cparams.n_batch;
+        const int32_t n_batch = n_batch_bottom;
         for (int32_t i0 = 0; i0 < n_tokens && ret == 0; i0 += n_batch) {
             const int32_t n = std::min(n_batch, n_tokens - i0);
 
@@ -1572,7 +1589,7 @@ int32_t llama_context::tokengate_prefill_ext(
             tg_kept_h.resize((size_t) n_kept * n_embd_h);
         }
 
-        const int32_t n_top = cparams.tg_fa_mean ? (int32_t) cparams.n_ubatch : std::min<int32_t>(cparams.n_ubatch, 512);
+        const int32_t n_top = get_tg_ubatch();
         for (int32_t i0 = 0; i0 < n_kept && ret == 0; i0 += n_top) {
             const int32_t n = std::min(n_top, n_kept - i0);
 
@@ -2634,7 +2651,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         }
     }
 
-    GGML_ASSERT(n_tokens_all <= cparams.n_batch);
+    const uint32_t n_batch_max = (cparams.tokengate && tg_prefill_phase != LLAMA_TG_PHASE_NONE) ?
+        std::max<uint32_t>(cparams.n_batch, (uint32_t) get_tg_ubatch()) : cparams.n_batch;
+    GGML_ASSERT(n_tokens_all <= n_batch_max);
 
     GGML_ASSERT((cparams.causal_attn || cparams.n_ubatch >= n_tokens_all) && "non-causal attention requires n_ubatch >= n_tokens");
 
@@ -2667,10 +2686,11 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
     llama_memory_context_ptr mctx;
 
-    // TokenGate: the exact gated attention of a ubatch is [n_kv, n_ubatch, n_head] wide without flash attention:
-    // cap the ubatch to 512 tokens when any gated sequence decode is about to run, so the memory fits
+    // TokenGate: decoupled ubatch for prefill phases (BOTTOM and TOP)
     uint32_t n_ubatch = cparams.n_ubatch;
-    if (cparams.tokengate && !cparams.tg_fa_mean && tg_prefill_phase == LLAMA_TG_PHASE_NONE && n_ubatch > 512) {
+    if (cparams.tokengate && tg_prefill_phase != LLAMA_TG_PHASE_NONE) {
+        n_ubatch = (uint32_t) get_tg_ubatch();
+    } else if (cparams.tokengate && !cparams.tg_fa_mean && tg_prefill_phase == LLAMA_TG_PHASE_NONE && n_ubatch > 512) {
         for (size_t s = 0; s < tg_states.seqs.size(); ++s) {
             if (tg_states.seqs[s].active && balloc->seq_pos_min((llama_seq_id) s) >= 0) {
                 n_ubatch = 512;
@@ -3031,7 +3051,8 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     const int64_t n_outputs_max = std::max<int64_t>(n_outputs, n_seq_max());
 
-    const auto n_batch    = cparams.n_batch;
+    const auto n_batch    = (cparams.tokengate && tg_prefill_phase != LLAMA_TG_PHASE_NONE) ?
+        std::max<uint32_t>(cparams.n_batch, (uint32_t) get_tg_ubatch()) : cparams.n_batch;
     const auto n_vocab    = vocab.n_tokens();
     const auto n_embd     = hparams.n_embd;
     const auto n_embd_out = n_embd_out_ctx();
@@ -3073,8 +3094,8 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
         backend_token_count = (1 + n_vocab) * n_outputs_max;    // sampled + candidates
     }
 
-    if (output_ids.empty()) {
-        // init, never resized afterwards
+    if (output_ids.empty() || output_ids.size() < n_batch) {
+        // init or grow when n_batch expands
         output_ids.resize(n_batch);
     }
 
