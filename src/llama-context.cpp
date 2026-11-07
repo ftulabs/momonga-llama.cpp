@@ -848,7 +848,7 @@ static int32_t get_tg_ubatch() {
                 return v;
             }
         }
-        return 512;
+        return 1024;
     }();
     return ubatch;
 }
