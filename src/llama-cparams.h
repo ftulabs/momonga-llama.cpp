@@ -81,6 +81,7 @@ struct llama_cparams {
     // the gated layers take flash attention with the head-mean of the per-head key bias folded into the mask
     // (approximate) instead of the exact per-head bias without flash attention
     bool           tg_fa_mean = false;
+    ggml_type      type_v     = GGML_TYPE_F16;
 
     // the gate's paired adapter: applied to the tokens of gated sequences only (see build_lora_mm)
     const llama_adapter_lora * tg_lora = nullptr;

@@ -232,6 +232,7 @@ llama_context::llama_context(
     embd_layer_inp.resize(hparams.n_layer() + 1);
 
     cparams.ctx_type          = params.ctx_type;
+    cparams.type_v            = params.type_v;
     cparams.tg_states         = &tg_states;
     tg_states.seqs.resize(cparams.n_seq_max);
     cparams.rope_scaling_type = params.rope_scaling_type;
@@ -558,16 +559,20 @@ llama_context::llama_context(
             why = "only default contexts are supported";
         } else if (!bottom_has_attn) {
             why = "no full-attention layer at or below the gate layer";
-        } else if (ggml_is_quantized(params.type_v)) {
-            // the gated layers take a per-key bias, which the flash-attention path cannot
-            why = "the gated layers need a non-quantized V cache";
+        } else if (ggml_is_quantized(params.type_v) && !cparams.flash_attn) {
+            // the exact gated layers take a per-key bias, which needs non-quantized V cache without flash attention
+            why = "the exact gated layers need a non-quantized V cache";
         }
 
         if (why) {
             LLAMA_LOG_WARN("%s: TokenGate disabled: %s\n", __func__, why);
         } else {
             cparams.tokengate = true;
-            LLAMA_LOG_INFO("%s: TokenGate enabled, memory split at the gate layer %d\n", __func__, hparams.tg_gate_layer);
+            if (ggml_is_quantized(params.type_v)) {
+                cparams.tg_fa_mean = true;
+            }
+            LLAMA_LOG_INFO("%s: TokenGate enabled, memory split at the gate layer %d (fa_mean: %d)\n",
+                    __func__, hparams.tg_gate_layer, cparams.tg_fa_mean);
         }
     }
 
@@ -1692,9 +1697,10 @@ bool llama_context::tokengate_active() const {
 }
 
 void llama_context::tokengate_set_fa(bool value) {
-    // split by heads (-sm tensor), the gated layers take the flash-attention form only: the gate bias coefficients
-    // are mirrored and cannot scale the split KQ of the exact form
-    cparams.tg_fa_mean = cparams.flash_attn && (value || model.split_mode() == LLAMA_SPLIT_MODE_TENSOR);
+    // split by heads (-sm tensor) or quantized V cache: the gated layers take the flash-attention form only:
+    // the gate bias coefficients are mirrored and cannot scale the split KQ of the exact form
+    const bool v_quant = ggml_is_quantized(cparams.type_v);
+    cparams.tg_fa_mean = cparams.flash_attn && (value || model.split_mode() == LLAMA_SPLIT_MODE_TENSOR || v_quant);
 }
 
 bool llama_context::tokengate_get_fa() const {
