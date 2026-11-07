@@ -433,6 +433,10 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+
+        // reduced LM head: if not null, the draft LM head only computes the listed token ids (sorted) and the end-of-generation ids
+        const llama_token * vocab_subset;
+        size_t              n_vocab_subset;
     };
 
     struct llama_model_tensor_override {
