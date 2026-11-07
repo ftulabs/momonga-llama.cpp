@@ -1206,7 +1206,7 @@ float * llama_context::get_embeddings_ith(int32_t i) {
         }
 
         const int64_t j = output_resolve_row(i);
-        const uint32_t n_embd_out = model.hparams.n_embd_out();
+        const uint32_t n_embd_out = n_embd_out_ctx();
         return embd.data + j*n_embd_out;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid embeddings id %d, reason: %s\n", __func__, i, err.what());
@@ -1745,7 +1745,7 @@ float * llama_context::get_embeddings_nextn_ith(int32_t i) {
             throw std::runtime_error("no nextn embeddings");
         }
 
-        const uint32_t n_embd = model.hparams.n_embd_out();
+        const uint32_t n_embd = n_embd_out_ctx();
 
         if (!cparams.embeddings_nextn_masked) {
             // unmasked: nextn rows are stored densely, indexed by raw token position.
@@ -2411,7 +2411,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
                 {
                     // extract token embeddings
                     GGML_ASSERT(embd.data != nullptr);
-                    const uint32_t n_embd_out = hparams.n_embd_out();
+                    const uint32_t n_embd_out = n_embd_out_ctx();
 
                     GGML_ASSERT(n_outputs*n_embd_out <= (int64_t) embd.size);
                     ggml_backend_tensor_get_async(backend_embd, t_embd, embd.data, 0, n_outputs*n_embd_out*sizeof(float));
@@ -2429,7 +2429,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
 
                         // use n_embd_out (not n_embd_inp) - the pooled embedding has the model's
                         // output dimension, which differs from input dimension for deepstack models (e.g. qwen3vl)
-                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        const uint32_t n_embd_out = n_embd_out_ctx();
                         embd_seq_out[seq_id].resize(n_embd_out);
                         ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd_out*seq_idx)*sizeof(float), n_embd_out*sizeof(float));
                     }
@@ -2461,7 +2461,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
         ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
         GGML_ASSERT(backend_h != nullptr);
 
-        const uint32_t n_embd = hparams.n_embd_out();
+        const uint32_t n_embd = n_embd_out_ctx();
         GGML_ASSERT(n_outputs*n_embd <= (int64_t) embd_nextn.size);
         ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn.data, 0, n_outputs*n_embd*sizeof(float));
     }
@@ -2853,7 +2853,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                     {
                         // extract token embeddings
                         GGML_ASSERT(embd.data != nullptr);
-                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        const uint32_t n_embd_out = n_embd_out_ctx();
                         float * embd_out = embd.data + n_outputs_prev*n_embd_out;
 
                         if (n_outputs) {
@@ -2871,7 +2871,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
                         // use n_embd_out (not n_embd_inp) - the pooled embedding has the model's
                         // output dimension, which differs from input dimension for deepstack models (e.g. qwen3vl)
-                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        const uint32_t n_embd_out = n_embd_out_ctx();
 
                         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
                             const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
@@ -2917,7 +2917,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                 ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
                 GGML_ASSERT(backend_h != nullptr);
 
-                const uint32_t n_embd  = hparams.n_embd_out();
+                const uint32_t n_embd  = n_embd_out_ctx();
                 float * embd_nextn_out = embd_nextn.data + offset*n_embd;
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
@@ -3028,7 +3028,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_batch    = cparams.n_batch;
     const auto n_vocab    = vocab.n_tokens();
     const auto n_embd     = hparams.n_embd;
-    const auto n_embd_out = hparams.n_embd_out();
+    const auto n_embd_out = n_embd_out_ctx();
 
     bool has_logits     = !cparams.embeddings || graph_has_logits;
     bool has_embd       = cparams.embeddings;
@@ -3220,7 +3220,7 @@ bool llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
 void llama_context::output_reorder() {
     const uint64_t n_vocab     = model.vocab.n_tokens();
     const uint64_t n_embd      = model.hparams.n_embd;
-    const uint64_t n_embd_out  = model.hparams.n_embd_out();
+    const uint64_t n_embd_out  = n_embd_out_ctx();
 
     for (size_t s = 0; s < output_swaps.size(); ++s) {
         const uint64_t i0 = output_swaps[s].i0;
