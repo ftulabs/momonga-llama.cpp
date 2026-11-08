@@ -913,7 +913,10 @@ static __global__ void mul_mat_vec_q(
 // launch-bounds parameter can express blocks per SM. Declaring 32 threads (one warp) and 24 blocks
 // per SM allows up to 85 registers per thread without stack spills while maintaining 37.5% occupancy.
 template <ggml_type type, int c_rows_per_block, bool has_fusion = false, bool tok_in_z = false>
-__launch_bounds__(ggml_cuda_get_physical_warp_size())
+__launch_bounds__(
+        (type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ4_XS) ? ggml_cuda_get_physical_warp_size()
+                                                              : get_mmvq_mmid_max_batch_for_device<type>()*ggml_cuda_get_physical_warp_size(),
+        (type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ4_XS) ? 32 : 1)
 static __global__ void mul_mat_vec_q_moe(
         const void * vx_ptr, const void * vy_ptr, const int32_t * ids_ptr, const ggml_cuda_mm_fusion_args_device fusion,
         float * dst_ptr,

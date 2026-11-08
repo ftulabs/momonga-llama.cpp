@@ -1194,7 +1194,7 @@ static size_t get_tg_ubatch_size() {
                 return (size_t) v;
             }
         }
-        return (size_t) 512;
+        return (size_t) 1024;
     }();
     return ubatch;
 }
