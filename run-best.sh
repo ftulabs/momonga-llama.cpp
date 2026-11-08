@@ -24,6 +24,12 @@ if [ -f "/mnt/ssd/models/draft-vocab-32k.json" ]; then
   VOCAB_ARG=(--spec-draft-vocab "/mnt/ssd/models/draft-vocab-32k.json")
 fi
 
+MMPROJ=${MMPROJ:-/mnt/ssd/models/mmproj-Ornith-1.5-35B-BF16.gguf}
+MMPROJ_ARG=()
+if [ "$MMPROJ" != "none" ] && [ -n "$MMPROJ" ] && [ -f "$MMPROJ" ]; then
+  MMPROJ_ARG=(--mmproj "$MMPROJ")
+fi
+
 for f in "$BIN" "$MODEL"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
@@ -38,7 +44,7 @@ env -u GGML_CUDA_DISABLE_GRAPHS "$BIN" \
   --tokengate --tokengate-k 2000 --tokengate-dilate 2 --tokengate-min-span 1024 --tokengate-fa \
   --spec-type draft-mtp --spec-draft-n-max 6 --spec-draft-n-min 0 \
   --spec-draft-p-min 0.5 --spec-draft-p-split 0.1 \
-  "${VOCAB_ARG[@]}" --load-mode none \
+  "${VOCAB_ARG[@]}" "${MMPROJ_ARG[@]}" --load-mode none \
   --port "$PORT" "$@" &
 SRV_PID=$!
 
