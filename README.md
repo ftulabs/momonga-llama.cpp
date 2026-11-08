@@ -1,78 +1,86 @@
 # momonga-llama.cpp
 
-A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that carries CUDA changes
-for one board: **Jetson AGX Xavier, Volta sm_72, CUDA 11.4**. Everything outside
-`ggml/src/ggml-cuda/` is upstream, unmodified.
+A high-performance fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) optimized
+for **Jetson AGX Xavier (Volta sm_72, CUDA 11.4)**. Everything outside `ggml/src/ggml-cuda/`,
+`common/`, `src/`, and `tools/` remains synchronized with upstream.
 
-The parent project is [llama.cpp](https://github.com/ggml-org/llama.cpp); its documentation
-(backends, tools, build options for every other platform) applies here unchanged except where
-this file says otherwise. See [JETSON-XAVIER.md](JETSON-XAVIER.md) for the full reasoning behind
-the patches.
+This fork specializes in hybrid MoE architectures (such as **Cyber-Tiel-Coder-35B-A3B** and
+**Qwen3.6-35B-A3B** with 30 Gated DeltaNet linear attention layers and 11 full attention layers),
+delivering:
+- **43.08 - 43.97 tok/s** speculative decode median (**47.5 - 48.4 tok/s** steady-state generation) via factory Multi-Token Prediction (MTP) with 0.968 - 0.975 acceptance.
+- **2,025 - 2,070 tok/s prefill** on long contexts via TokenGate layer-token pruning with decoupled prefill micro-batches and FlashAttention approximation (collapsing TTFT on 9.6k tokens from 53.3s to 4.79s, with 100% exact needle retrieval).
+- **Full 262,144 context (`-c 262144`)** supported out of the box with `q8_0` KV cache, leaving **4.4 GB of free RAM headroom** on the 32 GB unified memory Xavier.
+
+The parent project is [llama.cpp](https://github.com/ggml-org/llama.cpp); its upstream documentation applies unchanged except where documented here. Detailed architectural analysis is in [JETSON-XAVIER.md](JETSON-XAVIER.md), and the complete experimental record is in [FINDINGS.md](FINDINGS.md) and [findings/](findings/).
+
+---
 
 ## What is different
 
-    git log --oneline upstream/master..HEAD
+```sh
+git log --oneline upstream/master..HEAD
+```
 
-| commit | effect |
+| Commit / Change | Effect |
 |---|---|
-| `cuda : use MMVQ for MUL_MAT_ID on sm_72 and drop the per-type batch cap` | keeps the MoE matmul on the MMVQ kernel for batches above 4-5, where stock silently switches to MMQ and runs about 2.5x slower |
-| `cuda : run the IQ3_S MoE kernel at 64 registers instead of 79` | the launch bounds declared a 256-thread block for a one-warp kernel, so the compiler spent 79 registers and residency was capped at 37.5%; 64 registers gives 47.9% occupancy, -7.6% kernel time, +2.25% end to end |
-| `cuda : four rows per block and a wider small_k trigger on the dense MMVQ path` | the activation vector is re-read once per output row and that re-read is most of the L1 traffic at wide column counts; 4 rows per block, a 64 KB carveout, launch bounds at 8 blocks, a wider `small_k` trigger, and 4 rows at 1 column as well. Numerics-neutral. +4.3% end to end |
-| `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME` | debug only, off unless the variable is set |
-| `docs : ...` | fork-specific documentation: `JETSON-XAVIER.md`, this `README.md`, no code |
+| `cuda : use MMVQ for MUL_MAT_ID on sm_72 and drop the per-type batch cap` | Compares CC as range (`cc >= GGML_CUDA_CC_VOLTA && cc < GGML_CUDA_CC_TURING`), moving token index to `blockIdx.z`. Keeps MoE matmuls on the MMVQ kernel for batches above 4-5 instead of falling through to MMQ (2.5x slower). Eliminates launch-bounds constraints for arbitrary speculative batch sizes. |
+| `cuda : run the IQ3_S MoE kernel at 64 registers instead of 79` | Declares exact one-warp launch bounds (`__launch_bounds__(32, 32)`) for IQ3_S, dropping register pressure from 79 to 64 and raising occupancy from 37.5% to 47.9% (+2.25% end-to-end). |
+| `cuda : four rows per block and a wider small_k trigger on the dense MMVQ path` | Assigns 4 rows per block on dense MMVQ, adds 64 KB shared-memory carveout, and widens `small_k` triggers. Cuts L1 activation re-read traffic by 24-38% (+4.3% end-to-end). |
+| `cuda : pack destination rows per block in non-contiguous concat` | Eliminates wasted thread iterations in DeltaNet state concatenation (+0.29%). |
+| `cuda : pick the MoE prefill tile width from tokens per expert` | Tightens MMQ prefill tile width `J` from average tokens per expert rather than `ncols_opt`, eliminating discarded dp4a work during prefill (+12% prefill throughput). |
+| `speculative : single-sync sampling (PR #30196) and GPU draft sampler offload` | Performs draft chain sampling directly on the GPU without host-side token loops or CPU-GPU synchronization roundtrips. Eliminates 7.8 ms/pass of host idle latency. |
+| `llama : KV-only graphs for MTP draft catch-up (PR #31750)` | Uses dedicated KV-only computation graphs for speculative verification, skipping unnecessary output head evaluation during catch-up passes. |
+| `llama : --spec-draft-vocab for reduced draft LM head` | Pins MTP draft projection to active vocabulary subsets, reducing memory traffic on wide vocabularies. |
+| `cuda : enable CUB on CUDA 11.4 (sm_72) for native GPU argsort` | Activates NVIDIA CUB hardware radix sort routines on Volta, enabling fully offloaded `--backend-sampling` (`-bs`) for top-p and top-k without host fallback. |
+| `tokengate : extreme long-context prefill with decoupled ubatch and FA approximation` | Implements TokenGate layer-token pruning (`--tokengate --tokengate-fa`). Decouples prefill micro-batch size (`TG_UBATCH=512`) from speculative decode (`-b 32 -ub 32`), achieving **>2,000 tok/s prefill** without degrading speculative decode acceptance. |
+| `cuda : opt-in per-op timing dump behind GGML_CUDA_OP_TIME` | Debug instrumentation to inspect per-node GPU kernel execution times without external profilers (off by default). |
 
-Why the first one is needed: `get_mmvq_mmid_max_batch()` compared the compute capability with
-equality against `GGML_CUDA_CC_VOLTA` (700). Xavier reports 720, the comparison failed, and the
-per-type cap fell through to the `pascal_older` table. Above the cap, `MUL_MAT_ID` switched to
-MMQ. That matters because speculative decoding with the model's multi-token-prediction head runs
-at batches 3-7, exactly where the cliff sat.
+---
 
-The cap could not simply be raised: the MoE kernel was compiled with `__launch_bounds__` derived
-from the cap while launching `blockDim.y = n_tokens`, so anything above the table produced
-`CUDA error: invalid argument`. The patch moves the token index to `blockIdx.z`, which makes a
-block one warp at any batch, and compares the capability as a range instead.
+## Measured Performance
 
-## Measured result
+All numbers measured on NVIDIA Jetson AGX Xavier (Volta sm_72, CC 720, 30,991 MiB unified memory, 8-core Carmel CPU, CUDA 11.4):
 
-One model, one board, 400 generated tokens, greedy, median of 5 runs:
+### Speculative Generation (Decode)
 
-| configuration | tok/s | draft acceptance | mean draft length |
+Evaluated on `Cyber-Tiel-Coder-35B-A3B-tg.gguf` (17.3 GB NVMe SSD), greedy sampling, 5 runs median:
+
+| Configuration | Generation Throughput | Draft Acceptance | Mean Draft Length |
 |---|---|---|---|
-| stock `n-max 3` (best before the patch) | 31.50 | 0.989 | 3.69 |
-| this fork, `n-max 6`, dispatch patch only | 34.30-34.49 | 0.967 | 5.68 |
-| this fork, `n-max 6`, plus the 64-register launch bounds | 35.07 | 0.967 | 5.68 |
-| this fork, `n-max 6`, plus the dense MMVQ work | 36.56 | 0.967 | 5.68 |
-| this fork, plus the non-contiguous `concat` geometry | 36.63 | 0.967 | 5.68 |
-| this fork, plus `-bs` (`--backend-sampling`, +1.04%) | **36.93** | 0.967 | 5.68 |
-| no speculation, all-q4k file, `-bs` | **27.86** (23.75 at 8.8k context) | - | - |
+| Stock llama.cpp (`n-max 3`, best stock) | 31.50 tok/s | 0.989 | 3.69 |
+| Fork dispatch fix (`n-max 6`) | 34.30 - 34.49 tok/s | 0.967 | 5.68 |
+| + 64-register MoE launch bounds | 35.07 tok/s | 0.967 | 5.68 |
+| + Dense MMVQ 4 rows/block & 64 KB carveout | 36.56 tok/s | 0.967 | 5.68 |
+| + Non-contiguous concat & `-bs` | 36.93 tok/s | 0.967 | 5.68 |
+| **Current Best (`run-best.sh`, GPU sampler offload + CUB + TokenGate)** | **43.08 - 43.97 tok/s** | **0.968 - 0.975** | **5.53 - 5.75** |
+| *Steady-state generation (`tg_3s`, post-`<think>` tokens)* | **47.5 - 48.4 tok/s** | **0.975 - 0.980** | **5.80 - 5.92** |
+| Speculative decode at **262,144 context** (`-c 262144`) | **43.08 tok/s** | **0.968** | **5.53** |
+| No speculation (plain decode, `all-q4k` file, `-bs`) | 27.86 tok/s (23.75 at 8.8k ctx) | - | - |
 
-**A second profile exists with the drafter dropped**, which the table above does not cover
-because it is not the same configuration: `-ub` stops moving decode and becomes a free prefill
-parameter. **215.8 tok/s and 53.3 s TTFT at 11,484 tokens with `-ub 2048`** against 83.8 and
-137.1 s at `-ub 32`. Decode there is **27.86 tok/s** with the `all-q4k` file - `Q4_K_M` with the
-dense attention/GDN set at `q4_k`, every expert at `q4_k`, the shared expert at `q5_k` and
-`output.weight` at `q4_k`, in four measured steps worth +25.2% decode for +1.67% perplexity - or **23.18 with the Ornith DFlash sidecar at depth 3 on 8.8k
-of code** (acceptance 0.889), where the plain `Q4_K_M` file beats even the retyped ones (22.53
-for `dense-q5k`, 22.42 for `dense-q5k-lm5`) because `q8_0`'s and `q6_k`'s dots are cheaper at
-wide verify columns. The DFlash figure is context-dependent - 0.787
-acceptance on 8.8k of code with the IQ4_XS file, 0.523 on prose of the same length, 0.311 on 267
-tokens - so quote it with its prompt. `-ub 2048` is the widest width that measures reproducibly:
-3072 and 4096 scatter by 32-72% over identical loads. Neither profile replaces the other, and
-**the drafter does not come back to the retyped file**: MTP on it loads and drafts but acceptance
-falls to 0.64583 with mean len 2.10, for 23.35 tok/s against 27.86 plain.
+### Long-Context Document Prefill (TTFT)
 
-The patch alone does nothing at batch 4, where both paths were already legal. Its value is that
-drafting deeper stops being a penalty, which is where the 9.5% comes from. The range above is the
-same build measured on two upstream bases (`2cbca38` and `dde879b`); the difference is inside
-the noise of five reps. The 35.07 and 36.56 rows were each measured as a direct A/B on
-`2cbca38`: the runs differ only in `libggml-cuda.so.0`, and every one of them reports
-acceptance 0.96657 and mean length 5.68. That last point is the check that none of the
-kernel changes moved a number the model computes - only when a weight file changes does
-that pair move, and then it costs 44-46%.
+Evaluated on real text prompts across context lengths (measured client wire TTFT, cache off):
 
-## Build
+| Prompt Context | Baseline (`-ub 32`) | Decoupled TokenGate (`--tokengate-fa`) | Speedup | Client Wire TTFT | Needle Accuracy |
+|---|---|---|---|---|---|
+| 2,385 tokens | 84.3 tok/s | **805 tok/s** | 9.5x | **2.98 s** | 100% |
+| 9,562 tokens | 79.5 tok/s | **2,070.6 tok/s** | 26.0x | **4.79 s** | 100% |
+| 22,128 tokens | ~75 tok/s | **2,025.0 tok/s** | 27.0x | **11.15 s** | 100% |
+| High-Accuracy Needle Mode ($K=2000, W=2$) | 79.5 tok/s | **1,715.2 tok/s** | 21.5x | **14.39 s** | 100% (`BLUE-VELVET-99`) |
 
-On the Xavier, with CUDA 11.4 and the system gcc:
+---
+
+## Quick Start
+
+### 1. Build
+
+Run the automated build script:
+
+```sh
+./build-best.sh
+```
+
+Or configure manually via CMake:
 
 ```sh
 cmake -S . -B build-volta -DCMAKE_BUILD_TYPE=Release \
@@ -84,66 +92,65 @@ cmake -S . -B build-volta -DCMAKE_BUILD_TYPE=Release \
   -DGGML_CUDA_FA=ON -DGGML_CUDA_GRAPHS=ON -DGGML_NATIVE=ON \
   -DGGML_LTO=OFF -DLLAMA_BUILD_TESTS=OFF
 
-cmake --build build-volta -j8 --target llama-server
+cmake --build build-volta -j8 --target llama-server llama-cli llama-quantize llama-tokengate
 ```
 
-`CMAKE_CUDA_HOST_COMPILER` and the `-isystem` flags are both required on this image: nvcc as
-shipped with CUDA 11.4 rejects the system gcc and cannot find the C++ headers without them.
-`GGML_CUDA_NO_VMM` is required because Xavier is an integrated GPU without VMM support. For
-builds on anything else, use the upstream [build guide](docs/build.md) and ignore this section.
+*Note:* `CMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10.3.0` and the `-isystem` flags are required because CUDA 11.4's nvcc rejects the system gcc without them. `GGML_CUDA_NO_VMM` is required on Xavier's integrated GPU.
 
-## Run
+### 2. Run
+
+Run the verified production server with startup CUDA graph warm-up:
+
+```sh
+./run-best.sh
+```
+
+Or run directly with the complete production command line:
 
 ```sh
 env -u GGML_CUDA_DISABLE_GRAPHS \
-build-volta/bin/llama-server \
-  -m Cyber-Tiel-Coder-35B-A3B-MTP-UD-IQ4_XS.gguf \
+./build-volta/bin/llama-server \
+  -m /mnt/ssd/models/Cyber-Tiel-Coder-35B-A3B-tg.gguf \
   -c 262144 -fa on -ngl 99 -ncmoe 0 -t 2 -tb 2 \
   -ctk q8_0 -ctv q8_0 -ub 32 -b 32 --poll 0 --parallel 1 \
+  -bs \
+  --tokengate --tokengate-k 2000 --tokengate-dilate 2 --tokengate-min-span 1024 --tokengate-fa \
   --spec-type draft-mtp --spec-draft-n-max 6 --spec-draft-n-min 0 \
-  --spec-draft-p-min 0.5 --spec-draft-p-split 0.1 --load-mode none
+  --spec-draft-p-min 0.5 --spec-draft-p-split 0.1 \
+  --spec-draft-vocab /mnt/ssd/models/draft-vocab-32k.json \
+  --load-mode none --port 8080
 ```
 
-Graphs are enabled by the *absence* of `GGML_CUDA_DISABLE_GRAPHS`: the code checks for the
-variable's existence, not its value, so `GGML_CUDA_DISABLE_GRAPHS=0` still disables them.
-`-t 2 -tb 2` and the q8_0 KV types are measured optima on this board, not defaults. The values
-above are the fastest configuration found; the surrounding flag space was swept (batching,
-polling, KV types, draft depth, parallelism, load mode) and everything else measured neutral or
-worse on this board.
+---
 
-## Experiment hooks
+## Repository Documentation
 
-All of these default to upstream behaviour; nothing needs to be set to get the results above.
+All experimental records, hardware investigations, and configurations are maintained directly inside this repository:
 
-| variable | effect |
-|---|---|
-| `GGML_CUDA_MOE_RPB` | rows per block in the MoE kernel, default 2. 4 rows cuts L1 sectors 32% and kernel time 4.1% standalone but is exactly neutral in situ (63.98 vs 63.95 ms per pass), because the model's MoE cost is a per-token DRAM stream that an L1 lever cannot reach; kept for reproducibility |
-| `GGML_CUDA_MMID_MAX_BATCH` | forces the `MUL_MAT_ID` batch cap; 0 forces the MMQ path for A/B |
-| `GGML_CUDA_SMALLK` | forces the wide rows-per-block layout on or off |
-| `GGML_CUDA_OP_TIME` | per-op GPU timing dump to stderr, top 16 by time, every fifth graph. Disables CUDA graphs and costs real time - use it for shares, not for tok/s |
+- [KNOWN-GOOD.md](KNOWN-GOOD.md): The single source of truth for the validated best configuration.
+- [JETSON-XAVIER.md](JETSON-XAVIER.md): Comprehensive deep dive into the sm_72 CUDA kernels and architectural changes.
+- [FINDINGS.md](FINDINGS.md): Executive summary and timeline of every experiment.
+- [findings/](findings/): Complete archive of 55+ detailed, dated measurement logs and microbenchmarks.
+- [TODO.md](TODO.md): Task list, roadmap, and the "Closed - do not re-test" register.
+- [HANDOFF.md](HANDOFF.md): Engineering handoff notes, machine quirks, and profiling instructions.
+- [AGENTS.md](AGENTS.md): Guidelines and discipline rules for AI agents and contributors working in this repository.
+
+---
 
 ## Keeping up with upstream
 
-`origin` is this fork, `upstream` is `ggml-org/llama.cpp`:
+The remote layout is `origin` = this fork, `upstream` = `ggml-org/llama.cpp`:
 
 ```sh
 git fetch upstream
 git rebase upstream/master
-git push origin master    # fast-forward, no force needed
+git push origin master    # fast-forward
 ```
 
-The rebase applies cleanly as long as upstream has not touched
-`ggml/src/ggml-cuda/mmvq.cu` or `ggml/src/ggml-cuda/ggml-cuda.cu`. **If it has, re-measure
-instead of assuming the numbers still hold** - the patches are small enough to re-apply by hand,
-but the performance claims belong to the exact code that was measured. This `README.md` is
-fork-owned and will conflict on rebase; keep this version (`git checkout --ours README.md`).
+Documentation files (`README.md`, `AGENTS.md`, `JETSON-XAVIER.md`, `KNOWN-GOOD.md`, `FINDINGS.md`, `TODO.md`, `HANDOFF.md`, and `findings/`) are fork-owned. On rebase conflicts, preserve this fork's documentation (`git checkout --ours <doc>`).
 
-These changes are not proposed upstream. They exist for one board, one model and one
-configuration, and the profiler is debug scaffolding rather than something a maintainer should
-carry.
+---
 
 ## License
 
-MIT, as upstream. See [LICENSE](LICENSE). The upstream project's acknowledgements for bundled
-single-header libraries apply unchanged; they are listed in the
-[upstream README](https://github.com/ggml-org/llama.cpp#acknowledgements).
+MIT, matching upstream llama.cpp. See [LICENSE](LICENSE).

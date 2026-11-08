@@ -1,106 +1,87 @@
 # AGENTS.md - notes for agents working in this fork
 
 This is `ftulabs/momonga-llama.cpp`, a fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
-that carries two CUDA changes for a Jetson AGX Xavier (Volta sm_72, CUDA 11.4). Read
-[JETSON-XAVIER.md](JETSON-XAVIER.md) first for what the changes do and what they measured, and
-[README.md](README.md) for the build recipe and the launch line.
+that carries CUDA, speculative decoding, and long-context optimizations for **Jetson AGX Xavier (Volta sm_72, CUDA 11.4)**.
+Read [JETSON-XAVIER.md](JETSON-XAVIER.md) for detailed analysis of the kernel changes, [README.md](README.md) for the build recipe and launch command, and [KNOWN-GOOD.md](KNOWN-GOOD.md) for the verified production configuration.
 
 The upstream contribution rules in
 [ggml-org/llama.cpp AGENTS.md](https://github.com/ggml-org/llama.cpp/blob/master/AGENTS.md) are
 for PRs against upstream and **do not apply here** - the upstream file says so itself. What
 replaces them follows.
 
+---
+
 ## Rules
 
 1. **`origin` is this fork, `upstream` is `ggml-org/llama.cpp`.** Pushing to `origin` is normal
    and expected. **Never push to `upstream`, never open a PR against `ggml-org`, never send a
-   patch anywhere else.** These changes are board-specific and will not be accepted.
-2. **Commit only after the change is built and measured, not before.** A commit message must say
+   patch anywhere else.** These changes are board-specific and will not be accepted upstream.
+2. **Commit only after the change is built and measured, not before.** A commit message must state
    what was measured: the number, the config it was measured in, and the base commit. A change
    that "should" be faster and has not been run does not get committed as an improvement.
-3. **Verify a rebase instead of assuming it.** The other two commits are small and can be
-   re-applied by hand, but the performance claims belong to the exact code that was measured. If
-   upstream touches `ggml/src/ggml-cuda/mmvq.cu` or `ggml/src/ggml-cuda/ggml-cuda.cu`, rebuild
-   and re-measure before repeating any number.
-4. **ASCII only** in code, comments, commits and docs. No em dashes, no arrows, no curly quotes.
+3. **Verify a rebase instead of assuming it.** If upstream touches `ggml/src/ggml-cuda/`,
+   `common/speculative.cpp`, or `src/llama-context.cpp`, rebuild and re-measure before repeating
+   any number.
+4. **ASCII only** in code, comments, commits, and docs. No em dashes, no arrows, no curly quotes.
 5. **Comments are 1-2 lines** and explain why, not what. Do not hard-wrap comments to a column.
 6. **Do not benchmark with `GGML_CUDA_OP_TIME` set.** It disables CUDA graphs and costs real
    time; it is for attributing shares, not for tok/s.
 7. **The experiment hooks stay off by default.** `GGML_CUDA_MOE_RPB`, `GGML_CUDA_MMID_MAX_BATCH`,
    `GGML_CUDA_SMALLK` and `GGML_CUDA_OP_TIME` must all be unset for the documented numbers to
    apply. If a hook is added, it defaults to upstream behaviour or it is not added.
+8. **Update documentation with every finding or code change.** Whenever an experiment is completed
+   or code is modified, write the finding in `findings/YYYY-MM-DD-<topic>.md`, update `FINDINGS.md`,
+   `findings/README.md`, `TODO.md`, `KNOWN-GOOD.md`, `AGENTS.md`, `README.md`, and `JETSON-XAVIER.md`,
+   and commit to `origin`. Stale documentation wastes expensive GPU cycles.
+
+---
 
 ## What has been measured (do not re-derive)
 
-- **36.63 tok/s** kernel, **36.93 with `-bs`** (`--backend-sampling`, a host-side +1.04%), 400
-  generated tokens, greedy, median over 18 reps in both orders:
-  `--spec-draft-n-max 6 --spec-draft-p-min 0.5 -ub 32 -b 32 -ctk q8_0 -ctv q8_0`, draft
-  acceptance 0.96657, mean draft length 5.68. The best unpatched configuration is 31.50 at
-  `n-max 3`; plain decode with no speculation is **18.32** on the short prompt and **16.37** at
-  8.8k of context (the older 16.9 figure predates the dense MMVQ work). The stack underneath:
-  35.07 from the MoE
-  launch bounds, 34.30 without them, the dense MMVQ commits on top for 4.3%, and the last +0.29%
-  from packing destination rows in the non-contiguous `concat` kernel (36.56 -> 36.63).
-- **Without the MTP drafter, `-ub` is free and prefill is 2.6x faster.** With `--spec-type none`
-  decode does not move with width, so the width only buys prefill: **215.8 tok/s and 53.3 s TTFT
-  at 11,484 tokens with `-ub 2048`**, against 83.8 and 137.1 s at `-ub 32`. Plain decode is
-  **27.86 tok/s** (`-bs`) with `Q4KM-all-q4k.gguf` (dense attention/GDN at `q4_k`, every expert at
-  `q4_k`, shared expert `q5_k`, `output.weight` `q4_k`: four steps worth +25.2% decode for +1.67%
-  perplexity; prefill unchanged) and 23.75 at 8.8k of context; the
-  Ornith DFlash sidecar at depth 3 raises 8.8k of code to **23.18** on the plain `Q4_K_M` file
-  for about 7% of prefill, but acceptance depends on the prompt (0.889 with dense-q5k on 8.8k of
-  code / 0.787 with IQ4_XS / 0.523 prose / 0.311 on 267 tokens). Both retyped files lose there
-  (22.53 dense-q5k, 22.42 dense-q5k-lm5), so the sidecar profile stays on plain `Q4_K_M`. Two width rules, both measured:
-  **never above 2048 for a measurement** - 3072 and 4096 read 32% and 72% spreads over identical
-  loads - and never wider than the prompt (`-ub 8192` reads 95.4 tok/s at 11,484 against 214.6 at
-  2048). Prefill is flat across the quant files (215.7-220.9 at 11,484), so only decode separates
-  them. **MTP does not re-attach to a retyped file:** `--spec-type draft-mtp -n-max 6 -p-min 0.5`
-  on `all-q4k` loads and drafts (blk.40 is pinned back to its own types), but acceptance is
-  0.64583 with mean len 2.10, so decode is 23.35 against 27.86 plain - the requant wins and the
-  drafter are exclusive, not additive.
-- **The 9.5% comes from drafting deeper, not from the kernel being faster at a given batch.** The
-  patch does nothing at batch 4, where both paths were already legal. It removes a cliff above
-  4-5 columns that made every deeper config pay MMQ.
-- **`n-max 7` is slower** than 6. **`rows_per_block = 4` on the dense path** is now the default
-  and wins at the model level (+4.3% together with the carveout, the launch bounds and the
-  wider `small_k` trigger). *Corrected:* the old note here said it loses 0.7% and that the
-  default stays 2. That measurement was taken without the 64 KB carveout, which is part of the
-  change and not tuning on top of it. The MoE kernel's own `GGML_CUDA_MOE_RPB` hook is neutral in
-  situ - 63.98 ms per pass at 2 rows against 63.95 at 4, with the grid verified changed - so it
-  still defaults to 2.
-- **The board is not bandwidth-starved**: a full speculation pass moves about 8.1 GB in 171 ms,
-  which is 47 GB/s or 43% of a measured 110 GB/s. *Corrected twice:* the earlier 32-35% figure
-  counted only the 41-layer forward and omitted the six 1-column lm_head draft calls (2.5 GB).
-  *Corrected:* the IQ3_S expert matmul is not ALU-bound either - hardware counters put
-  `long_scoreboard` (waiting on a load) ahead of `math_pipe_throttle`. It was occupancy-limited
-  by a launch-bounds declaration that named a 256-thread block for a 32-thread kernel, and fixing
-  that was worth +2.25%. In situ the MoE is now measured as a pure DRAM stream at 44-52 GB/s
-  whose cost is linear in tokens with no intercept, so its remaining headroom is memory-level
-  parallelism per warp, not occupancy and not launch geometry.
-- Measurement discipline that produced those numbers: 5 reps and a median for anything under 2%,
-  never extrapolate a microbenchmark across batch sizes, report draft acceptance with every
-  weight or config change, and write a negative result down with the same care as a positive one.
+- **43.08 - 43.97 tok/s speculative decode** median on 400-600 tokens (and **47.5 - 48.4 tok/s** steady-state generation once `<think>` reasoning tags conclude), with draft acceptance 0.968 - 0.975 and mean draft length 5.53 - 5.75 on `Cyber-Tiel-Coder-35B-A3B-tg.gguf`. The stack underneath:
+  - 31.50 stock unpatched `n-max 3` baseline.
+  - 34.30 - 34.49 from the sm_72 MoE MMVQ dispatch patch (`blockIdx.z`).
+  - 35.07 from the 64-register MoE launch bounds.
+  - 36.56 from dense MMVQ 4 rows per block + 64 KB carveout + wider `small_k`.
+  - 36.63 from non-contiguous concat geometry.
+  - 36.93 from backend sampling (`-bs`).
+  - **43.08 - 43.97** from single-sync sampling (PR #30196) and GPU draft sampler offload (`9c26dfe`), eliminating host sampling roundtrips and CPU idle overhead, paired with reduced draft LM head vocabulary (`--spec-draft-vocab`) and hardware CUB radix sorting on CUDA 11.4 (`1f33695`).
+- **2,025 - 2,070 tok/s long-context prefill** via TokenGate (`--tokengate --tokengate-fa`):
+  - In layers 0..3, dense evaluation runs at decoupled ubatch (`TG_UBATCH=512`).
+  - In layers 4..40, 85-95% of tokens are pruned, evaluating only kept tokens ($K=350-400$).
+  - Client wire TTFT collapses to **4.79 s at 9.6k tokens** and **11.15 s at 22.1k tokens**.
+  - High-accuracy needle mode ($K=2000, W=2$) runs at **1,715 tok/s** with 100% exact needle retrieval (`BLUE-VELVET-99`) verified.
+- **262,144 context allocation (`-c 262144`)** with `q8_0` KV cache verified live. Because the hybrid model has 30 recurrent DeltaNet layers ($O(1)$ memory per token) and only 11 attention layers, KV cache at 262k consumes only 8.25 GB, leaving **4.4 GB of free RAM headroom** on the 32 GB Xavier and sustaining **43.08 tok/s** decode.
+- **Without the MTP drafter, `-ub` is free and prefill is 2.6x faster on dense models.** With `--spec-type none`, decode does not move with width: **215.8 tok/s prefill / 53.3 s TTFT at 11,484 tokens with `-ub 2048`**, against 83.8 tok/s at `-ub 32`. Plain decode is **27.86 tok/s** (`-bs`) with `Q4KM-all-q4k.gguf` (23.75 at 8.8k context). MTP cannot re-attach to the retyped file without retraining (acceptance drops to 0.64583, decode collapses to 23.35 tok/s).
+- **The board is not bandwidth-starved**: a full speculation pass moves about 8.1 GB in 171 ms, which is 47 GB/s or 43% of the measured 110 GB/s peak sequential ceiling. In situ the MoE is measured as a pure DRAM stream at 44-52 GB/s whose cost is linear in tokens with no intercept.
+- **Measurement discipline:** 5 reps and median for anything under 2%, pre-register predictions in writing before running experiments (Rule 1), evaluate draft acceptance alongside tok/s, use interleaved both-orders testing for flags, and report negative results with equal prominence.
 
-## Build and run
+---
 
-Both are in [README.md](README.md). The short version: CMake with
-`-DCMAKE_CUDA_ARCHITECTURES=72`, `-DCMAKE_CUDA_COMPILER=/usr/local/cuda-11.4/bin/nvcc`,
-`-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10.3.0`, the `-isystem` flags for the C++ headers, and
-`-DGGML_CUDA_NO_VMM=ON`. nvcc as shipped here rejects the system gcc without them.
+## Build and Run
 
-Running the server needs `env -u GGML_CUDA_DISABLE_GRAPHS`, because the code tests for the
-variable's existence rather than its value.
+Run the automated scripts:
 
-## Where the rest of the context lives
+```sh
+./build-best.sh
+./run-best.sh
+```
 
-The measurement notebooks are **not in this repository**. They live in the parent workspace on
-the machine this fork was built on: `KNOWN-GOOD.md` (the validated configuration), `findings/`
-(one file per experiment), `TODO.md` (including a "closed - do not re-test" list) and `bench/`
-(the harness). Ask before assuming a number that appears in a commit message, because those files
-are the source of truth and this file is only a summary.
+Or run manual CMake and server commands as documented in [README.md](README.md).
 
-## Maintenance
+---
 
-`README.md`, `AGENTS.md` and `JETSON-XAVIER.md` are fork-owned and will conflict when rebasing
-onto upstream. Keep the fork version (`git checkout --ours README.md`). Everything else in the
-tree is upstream and should be kept as upstream wrote it.
+## Repository Documentation
+
+All documentation and measurement records live **directly inside this repository**:
+
+- [KNOWN-GOOD.md](KNOWN-GOOD.md): Validated best configuration and reproduction line.
+- [FINDINGS.md](FINDINGS.md): Chronology and executive summary of all experiments.
+- [findings/](findings/): Complete directory of 55+ dated experiment logs.
+- [TODO.md](TODO.md): Task roadmap and closed-do-not-retest register.
+- [HANDOFF.md](HANDOFF.md): Engineering handoff notes, machine telemetry, and profiling instructions.
+- [JETSON-XAVIER.md](JETSON-XAVIER.md): Comprehensive deep dive into sm_72 CUDA kernels.
+
+## Maintenance and Rebase
+
+`README.md`, `AGENTS.md`, `JETSON-XAVIER.md`, `KNOWN-GOOD.md`, `FINDINGS.md`, `TODO.md`, `HANDOFF.md`, and `findings/` are fork-owned and will conflict when rebasing onto upstream. Keep the fork version (`git checkout --ours <file>`). Everything else in the tree stays aligned with upstream.
