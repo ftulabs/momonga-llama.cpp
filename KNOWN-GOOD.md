@@ -11,7 +11,7 @@ Host flags: `-bs` (`--backend-sampling`), `-ub 32 -b 32`, `-ctk q8_0 -ctv q8_0`,
 Before `-bs`, the last change was the `concat_non_cont` launch geometry in
 `ggml/src/ggml-cuda/concat.cu`, worth +0.29% against a
 36.525 control measured on the same board in the same session
-([findings/2026-11-04-gdn-concat-geometry.md](findings/2026-11-04-gdn-concat-geometry.md)).
+([findings/cyber-tiel-qwen35moe/2026-11-04-gdn-concat-geometry.md](findings/cyber-tiel-qwen35moe/2026-11-04-gdn-concat-geometry.md)).
 Before it, 2026-11-03 measured **36.56** (35.67 / 36.61 / 36.69 / 36.56 / 36.42) on the same
 harness.
 That is 35.07 plus five numerics-neutral changes to the dense `mul_mat_vec_q` path: 4 rows per
@@ -22,11 +22,11 @@ rather than only when K is shorter than one, and 4 rows per block at ncols 1 as 
 the 1-column q6_K lm_head that drafts all six MTP steps. L1 load sectors fall 24% at the
 1-column lm_head and 38% at the 7-column verify shape while occupancy is unchanged, so the gain
 is traffic, not parallelism. See
-[findings/2026-11-03-dense-mmvq-rows-per-block.md](findings/2026-11-03-dense-mmvq-rows-per-block.md).
+[findings/cyber-tiel-qwen35moe/2026-11-03-dense-mmvq-rows-per-block.md](findings/cyber-tiel-qwen35moe/2026-11-03-dense-mmvq-rows-per-block.md).
 The 35.07 underneath it is the IQ3_S MoE kernel running at 64 registers instead of 79, which
 lifts its occupancy from 34.9% to 47.9% and its kernel time by -7.6%; the control on the same
 base measures 34.30 (33.10 / 34.30 / 34.47 / 34.43 / 34.08), so the change is +2.25%. See
-[findings/2026-11-03-occupancy-on-iq3s.md](findings/2026-11-03-occupancy-on-iq3s.md).
+[findings/cyber-tiel-qwen35moe/2026-11-03-occupancy-on-iq3s.md](findings/cyber-tiel-qwen35moe/2026-11-03-occupancy-on-iq3s.md).
 For the record, the same configuration before the register change measured 34.49 on `dde879b`
 (34.10 / 34.36 / 34.64 / 34.49 / 34.49) and 34.30 after the rebase onto fork master `2cbca38`
 (33.34 / 34.14 / 34.36 / 34.30 / 34.30), both at acceptance 0.96657 and mean len 5.68. The
@@ -34,7 +34,7 @@ For the record, the same configuration before the register change measured 34.49
 change is, and it was measured as a direct A/B on one base with one shared library swapped.
 The previous configuration (`n-max 3`) measures 31.50 on the same harness. This is the fastest
 measured configuration for Cyber-Tiel-Coder-35B-A3B-MTP on this board. Do not change anything below without reading
-[findings/2026-11-02-bandwidth-and-flag-audit.md](findings/2026-11-02-bandwidth-and-flag-audit.md)
+[findings/cyber-tiel-qwen35moe/2026-11-02-bandwidth-and-flag-audit.md](findings/cyber-tiel-qwen35moe/2026-11-02-bandwidth-and-flag-audit.md)
 first - the whole surrounding flag space has been measured and everything else is neutral or worse.
 
 ## Run it
@@ -59,11 +59,11 @@ consumes only 8.25 GB, leaving **4.4 GB of free RAM headroom** on Xavier and sus
 with 0.97546 draft acceptance and 0 graph reallocs. (Do not use `q4_0` KV without precision tailing: naive
 `q4_0` KV collapses draft acceptance to 0.637 and throughput to 23.2 tok/s). Requires all local patches:
 in this fork's `master`: the MUL_MAT_ID dispatch fix
-([2026-11-03-cliff-is-the-dispatch-table.md](findings/2026-11-03-cliff-is-the-dispatch-table.md)) -
+([2026-11-03-cliff-is-the-dispatch-table.md](findings/cyber-tiel-qwen35moe/2026-11-03-cliff-is-the-dispatch-table.md)) -
 without it `n-max` above 4 falls onto MMQ and the number is not reproducible; the 64-register
 `__launch_bounds__` on the IQ3_S MoE kernel
-([2026-11-03-occupancy-on-iq3s.md](findings/2026-11-03-occupancy-on-iq3s.md)); and the dense-path
-change [(2026-11-03-dense-mmvq-rows-per-block.md)](findings/2026-11-03-dense-mmvq-rows-per-block.md),
+([2026-11-03-occupancy-on-iq3s.md](findings/cyber-tiel-qwen35moe/2026-11-03-occupancy-on-iq3s.md)); and the dense-path
+change [(2026-11-03-dense-mmvq-rows-per-block.md)](findings/cyber-tiel-qwen35moe/2026-11-03-dense-mmvq-rows-per-block.md),
 whose four sub-changes are one unit - the rows-per-block increase without the carveout and the
 launch bounds measures slower than the default. On upstream base `2cbca38` without the last one
 the same harness reads 35.07.
@@ -73,7 +73,7 @@ tokens per expert** instead of the token count, which the code already did on RD
 does on NVIDIA. It is on by default (`GGML_CUDA_MMQ_MOE_TILE_AVG=0` turns it off) and it is worth
 **+9 to +12% prefill, TTFT 134.6 s -> 120.2 s at 9,563 tokens**, with acceptance and mean length
 bit-identical. Without it the prefill table below reads 78.8 / 75.8 / 71.0.
-[2026-11-04-prefill-moe-tile-width.md](findings/2026-11-04-prefill-moe-tile-width.md).
+[2026-11-04-prefill-moe-tile-width.md](findings/cyber-tiel-qwen35moe/2026-11-04-prefill-moe-tile-width.md).
 
 Two things that silently break this:
 
@@ -136,7 +136,7 @@ Prompts containing documents wrapped in `<context>...</context>` or `<document>.
 is pinned at 1,377 MHz (MAXN), the host is idle and a cold page cache costs only 5.1% - so storage,
 clocks, host load and DRAM rate are all eliminated and the drift sits inside the served process
 (most likely the physical placement of the 18 GB allocation). Compare only arms measured in the same
-server load. See [findings/2026-11-05-prefill-page-cache.md](findings/2026-11-05-prefill-page-cache.md)
+server load. See [findings/cyber-tiel-qwen35moe/2026-11-05-prefill-page-cache.md](findings/cyber-tiel-qwen35moe/2026-11-05-prefill-page-cache.md)
 section 3c.
 
 **These are the post-H3 numbers (2026-11-04): the MoE prefill tile is now chosen from the average
@@ -144,7 +144,7 @@ tokens per expert rather than from the token count, which is on by default and i
 Before that change the same fixture read 7,491 / 31,468 / 134,638 ms at 78.8 / 75.8 / 71.0 tok/s** -
 those older figures appear throughout `findings/` and are the baseline the H3 arms were measured
 against, not the current configuration. See
-[findings/2026-11-04-prefill-moe-tile-width.md](findings/2026-11-04-prefill-moe-tile-width.md).
+[findings/cyber-tiel-qwen35moe/2026-11-04-prefill-moe-tile-width.md](findings/cyber-tiel-qwen35moe/2026-11-04-prefill-moe-tile-width.md).
 The prefill drift floor with six arms in one protocol is 0.56% at 9.5k / 1.6% at 2,385 / 2.1% at
 590 tokens, so a single-order prefill claim below ~2% is not evidence.
 
@@ -173,10 +173,10 @@ even monotonic, because above 64 tokens the MoE stops using MMQ altogether
 (`MMQ_DP4A_MAX_BATCH_SIZE = 64`, `should_use_mmq()` returns `n_tokens < 64`) and switches to a
 per-expert dequant+cuBLAS loop, so the *engine* changes and not just its tile width. `ub 64` is the
 decisive negative: +4-7% prefill for -10% decode. **A width is usable only while acceptance stays
-bit-identical, which today means 32.** See `findings/2026-11-04-prefill-starting-point.md` section 7.
+bit-identical, which today means 32.** See `findings/cyber-tiel-qwen35moe/2026-11-04-prefill-starting-point.md` section 7.
 
 This is the open front, and the campaign is in
-[findings/2026-11-04-prefill-starting-point.md](findings/2026-11-04-prefill-starting-point.md)
+[findings/cyber-tiel-qwen35moe/2026-11-04-prefill-starting-point.md](findings/cyber-tiel-qwen35moe/2026-11-04-prefill-starting-point.md)
 and `TODO.md`.
 
 ## The MTP-free profile (2026-11-05, rewritten 18:40)
@@ -254,7 +254,7 @@ SPEC=draft-dflash DRAFT_MODEL=/mnt/ssd/models/Ornith-1.5-35B-A3B-DFlash-BF16.ggu
   number. It needs a second model resident: on a 31 GB unified box the 22.5 GB Q4_K_M file leaves
   room for the sidecar only at `-c 12288 -ub 512`; `-ub 1024` dies at the first graph launch and
   `-ub 2048` cannot even allocate its compute buffers.
-- See [findings/2026-11-05-mtp-free-campaign.md](findings/2026-11-05-mtp-free-campaign.md)
+- See [findings/cyber-tiel-qwen35moe/2026-11-05-mtp-free-campaign.md](findings/cyber-tiel-qwen35moe/2026-11-05-mtp-free-campaign.md)
   sections 18-23. Sections 14-16 of that file are superseded on prefill.
 
 ## Build it
@@ -327,12 +327,12 @@ speculation pass also runs six 1-column lm_head calls against `output.weight`, w
 its own, so the pass moves about **8.1 GB** (MoE 3.1, lm_head 2.9, dense q8_0 2.07) in 170.6 ms =
 **47 GB/s, 43% of the ceiling**. The MoE's 3.1 GB is spent because each token routes to its own
 8 experts, so per-launch cost is linear in tokens and nothing is reused. See
-`findings/2026-11-03-moe-share-in-situ.md`.
+`findings/cyber-tiel-qwen35moe/2026-11-03-moe-share-in-situ.md`.
 
 ## Where this is recorded
 
 - [findings/README.md](findings/README.md) - index and measurement conventions
-- [findings/2026-11-01-decode-speed-tuning.md](findings/2026-11-01-decode-speed-tuning.md) - how the configuration was found
-- [findings/2026-11-02-bandwidth-and-flag-audit.md](findings/2026-11-02-bandwidth-and-flag-audit.md) - bandwidth ceiling, flag audit, upstream triage
-- [findings/2026-11-03-decode-pass-budget.md](findings/2026-11-03-decode-pass-budget.md) - **where the 163 ms pass actually goes.** Read this before choosing any kernel work: MoE experts 38.7%, lm_head 25.2%, dense q8_0 19.6%. If a proposed optimisation is not in one of those three, it cannot be worth more than 1-2%.
+- [findings/cyber-tiel-qwen35moe/2026-11-01-decode-speed-tuning.md](findings/cyber-tiel-qwen35moe/2026-11-01-decode-speed-tuning.md) - how the configuration was found
+- [findings/cyber-tiel-qwen35moe/2026-11-02-bandwidth-and-flag-audit.md](findings/cyber-tiel-qwen35moe/2026-11-02-bandwidth-and-flag-audit.md) - bandwidth ceiling, flag audit, upstream triage
+- [findings/cyber-tiel-qwen35moe/2026-11-03-decode-pass-budget.md](findings/cyber-tiel-qwen35moe/2026-11-03-decode-pass-budget.md) - **where the 163 ms pass actually goes.** Read this before choosing any kernel work: MoE experts 38.7%, lm_head 25.2%, dense q8_0 19.6%. If a proposed optimisation is not in one of those three, it cannot be worth more than 1-2%.
 - [TODO.md](TODO.md) - what is genuinely still open

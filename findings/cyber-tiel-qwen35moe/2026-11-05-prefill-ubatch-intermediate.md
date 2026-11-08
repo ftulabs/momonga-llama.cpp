@@ -5,7 +5,7 @@
 
 ## 1. Why this is not covered by the closed width sweep
 
-The ubatch-width sweep (`findings/2026-11-04-prefill-starting-point.md` section 7) measured
+The ubatch-width sweep (`./2026-11-04-prefill-starting-point.md` section 7) measured
 **32 / 64 / 96 / 128 / 256 / 512** and closed the question of trading decode for TTFT: prefill
 1.00x / 1.06x / 1.28x / 1.45x / 1.91x / 2.4x against acceptance 0.96657 / 0.91592 / 0.68122 /
 0.92258 / 0.57655 / 0.65882. The configuration stayed at 32 because **64 costs 5 points of
@@ -71,7 +71,7 @@ traffic argument has nothing in it to break - which is why the prediction below 
 3. TTFT at 9,563 tokens follows the prefill number; at the good end, 120 s -> 100 s.
 
 Because the prefill measurement is cross-server-load and the load-to-load drift is up to 17%
-(`findings/2026-11-05-prefill-page-cache.md` section 3c), the arms are run **interleaved in both
+(`./2026-11-05-prefill-page-cache.md` section 3c), the arms are run **interleaved in both
 orders in one session** with the control repeated at the end, so the A/A difference gives the
 floor for this comparison. Acceptance and mean len do not need that treatment: they reproduce
 bit-for-bit across loads.
@@ -162,4 +162,4 @@ a future numerics-safe wide batch would exploit, and it is also the explanation 
 - What is left at `-ub 32` is inside `mul_mat_q`: the dp4a tile performs a J=8 column dot for 1-2
   useful columns and the block serialises dequant, a shared-memory store and two barriers per K
   iteration. Both were measured (H3 + this file), and there is no launch parameter left -
-  `findings/2026-11-04-prefill-57gbs-probe.md` and `...-mmq-tile-i64.md` close that space.
+  `./2026-11-04-prefill-57gbs-probe.md` and `...-mmq-tile-i64.md` close that space.

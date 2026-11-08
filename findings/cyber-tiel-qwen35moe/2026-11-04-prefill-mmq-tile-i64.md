@@ -4,7 +4,7 @@ Status: prediction recorded before the build and the run.
 
 ## 1. Where this comes from
 
-`findings/2026-11-04-prefill-57gbs-probe.md` measured, with a pure-load kernel at the prefill MoE's
+`./2026-11-04-prefill-57gbs-probe.md` measured, with a pure-load kernel at the prefill MoE's
 own access shape and working set, that read bandwidth is governed by **warps per SM**:
 
 | warps/SM | 8 | 16 | 24 | 32+ |
@@ -114,7 +114,7 @@ nothing from 16 -> 20 warps, so its limiter is not memory-level parallelism. Per
 it also does a dequantise, a shared-memory store of the expanded int8 tile (14 KB read -> 33 KB at
 I=128) and two barriers per K iteration, all of which scale with warps on the same LSU/SMEM path.
 This is the same signature as the decode-side dp4a kernels, where `lg_throttle` - the L1 refusing
-load instructions - is the top stall while occupancy has headroom (findings/2026-11-04-lmhead-1col-occupancy.md).
+load instructions - is the top stall while occupancy has headroom (./2026-11-04-lmhead-1col-occupancy.md).
 Adding warps to a pipe that is already issue-saturated buys nothing, which is what 16 -> 20 warps
 delivered: 0.
 
@@ -143,7 +143,7 @@ an 18 GB working set in 30.9 GB of RAM, so the page cache thrashed on every rep 
 three recorded reps read 79.4-79.5, not a cold first rep followed by fast ones.
 
 Test: drop the page cache and measure one rep (see
-`findings/2026-11-05-prefill-page-cache.md`). If it reproduces ~79 tok/s the mechanism is
+`./2026-11-05-prefill-page-cache.md`). If it reproduces ~79 tok/s the mechanism is
 confirmed and the practical consequence is large: the documented TTFT depends on whether the
 weights are resident, and a warm-up request or an eager load moves that cost out of the user's
 first token.

@@ -10,7 +10,7 @@ Control arm measured in the same session: **34.82 tok/s**, acceptance 0.96657, m
 
 `--spec-draft-p-min` gates draft *depth per pass* on the drafter's top-1 probability
 (`common/speculative.cpp:1468`). It had only ever been swept at **draft depth 3, on the
-pre-dispatch-patch build** (`findings/2026-11-01-decode-speed-tuning.md`), where it was the single
+pre-dispatch-patch build** (`./2026-11-01-decode-speed-tuning.md`), where it was the single
 largest lever found - worth more than every build flag combined. The dispatch patch moved the
 optimal depth from 3 to 6 (`AGENTS.md` section 7), and that same finding says explicitly: *"the gate
 and depth interact; do not tune one without the other."* So the 0.50 optimum rested on a
@@ -29,7 +29,7 @@ of draft slots are used, so the gate must already be near-saturated and therefor
 
 **The premise was wrong in a specific and reusable way.** `mean_len` is *conditional on a draft
 having been made* - passes where the gate skips drafting entirely are excluded from it. So a high
-mean_len says nothing about how often the gate binds. `findings/2026-11-01-decode-speed-tuning.md`
+mean_len says nothing about how often the gate binds. `./2026-11-01-decode-speed-tuning.md`
 warns about exactly this ("acceptance and mean len are conditional... they hide passes that produce
 no draft at all"), and this prediction walked into it anyway. The gate is *not* saturated at depth
 6: at 0.40 the model generated 308-384 draft tokens per window against 310-326 at 0.50-0.70, so
@@ -67,7 +67,7 @@ Two things in the table matter beyond the ranking:
   leftover from the depth-3 era; it is still the right value, now measured at the depth the model
   actually runs.
 - The speculation flag surface is now swept at the operating point: `p-min` here, `p-split` at
-  0.05/0.10/0.20 neutral (`findings/2026-11-02-bandwidth-and-flag-audit.md`), depth 3/5/6/7 with 6
+  0.05/0.10/0.20 neutral (`./2026-11-02-bandwidth-and-flag-audit.md`), depth 3/5/6/7 with 6
   the optimum (`AGENTS.md` section 7). **Flags are not a lever.** The pass budget has to come down
   in kernel time or weight format.
 - **The interval 0.40-0.50 was deliberately not fine-swept (0.45, 0.48), and neither was 0.55.**
@@ -82,4 +82,4 @@ Two things in the table matter beyond the ranking:
   Anything that lowers the effective confidence of the drafter - a different quant, a perturbed
   router, a build that changes accumulation order - pushes the same direction as lowering `p-min`,
   and the low side is a cliff, not a slope. That is the same fragility that produced -45.6% in
-  `findings/2026-11-03-mmwq-launch-params.md` section 5.
+  `./2026-11-03-mmwq-launch-params.md` section 5.

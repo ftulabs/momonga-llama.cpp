@@ -12,7 +12,7 @@
 
 Previously, TokenGate document prefill inherited `cparams.n_batch` and `cparams.n_ubatch` from the server launch arguments (`-b 32 -ub 32`). On an 8.6k prompt (8,635 tokens), Phase 1 (`LLAMA_TG_PHASE_BOTTOM`, layers 0..3) executed 270 iterations of 32-token batches, and Phase 2 (`LLAMA_TG_PHASE_TOP`, layers 4..40 over 2,000 kept tokens) executed 63 iterations of 32-token batches. This bottlenecked Volta sm_72 tensor cores at narrow batch-32 GEMM throughput, resulting in a total prefill latency of 32.42 s (client TTFT 32.54 s).
 
-Attempting to raise `-b 2048` globally caused decode throughput to collapse (-48%) because `server-context.cpp` submitted short prompts as single large batches, altering numerical boundaries and decoupling the MTP drafter (`findings/2026-11-07-logical-batch-b2048-negative.md`).
+Attempting to raise `-b 2048` globally caused decode throughput to collapse (-48%) because `server-context.cpp` submitted short prompts as single large batches, altering numerical boundaries and decoupling the MTP drafter (`./2026-11-07-logical-batch-b2048-negative.md`).
 
 In this work, we decoupled the micro-batch size exclusively within `tokengate_prefill_ext()`, setting `n_batch = get_tg_ubatch()` (default 512, configurable via `TG_UBATCH`) during TokenGate prefill phases while strictly keeping `-b 32 -ub 32` for all standard prefill and speculative decode passes.
 

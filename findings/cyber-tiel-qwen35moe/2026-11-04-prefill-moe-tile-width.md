@@ -1,7 +1,7 @@
 # H3: the prefill MoE tile is 32 columns wide and 31 of them are thrown away
 
 Date: 2026-11-04. Status: in progress. H2 established that `mul_mat_q` is **88.1% of prefill** at the
-production `-ub 32` (`findings/2026-11-04-prefill-budget.md`), split IQ3_S 52.9% / IQ4_XS 23.0% /
+production `-ub 32` (`./2026-11-04-prefill-budget.md`), split IQ3_S 52.9% / IQ4_XS 23.0% /
 Q8_0 12.4%. This file is the attack on that 88%.
 
 ## 1. Prediction, written before the first run

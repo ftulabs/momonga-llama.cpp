@@ -16,7 +16,7 @@ agent knows this run's expectation is not evidence.
 
 ## Why these two arms
 
-`findings/2026-11-04-backend-sampling.md` showed that a flag the 28-config sweep dismissed as
+`./2026-11-04-backend-sampling.md` showed that a flag the 28-config sweep dismissed as
 "inside +-1% noise" (`-bs`) was really **+1.04%** when re-tested with the interleaved both-orders
 protocol. That sweep (and the earlier 2026-11-02 audit, which also scored `-bs` as neutral) ran
 single-order, 3 reps, on the 31.5 tok/s build - a protocol that per rule 7 cannot resolve 1%.

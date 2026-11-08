@@ -1,7 +1,7 @@
 # The CPU side of a decode pass: 42 ms of host work per 156 ms pass (2026-11-04)
 
 Status: **negative on the idle, positive on the accounting.** The 7.14 ms/pass of GPU idle that
-`findings/2026-11-04-lmhead-1col-occupancy.md` could not attribute is real but small; the
+`./2026-11-04-lmhead-1col-occupancy.md` could not attribute is real but small; the
 surprise is how much host work a pass costs and where it sits. This is the CPU-side profile that
 the earlier nsys-only audit said was needed.
 
@@ -99,7 +99,7 @@ sits between two launches on a strictly serialised dependency chain.
   the sampler chain and the per-call fusion/split.
 * `--backend-sampling` (`-bs`) is the fork's existing switch for the first block: it runs the
   chain on the GPU and reads back only the candidates. A/B result is in
-  `findings/2026-11-04-backend-sampling.md`.
+  `./2026-11-04-backend-sampling.md`.
 
 ## Caveats
 
@@ -114,7 +114,7 @@ sits between two launches on a strictly serialised dependency chain.
 
 # Follow-up, same day: the same profile with `-bs` on (the adopted config)
 
-`-bs` was adopted on the strength of `findings/2026-11-04-backend-sampling.md` (+1.04%), and this
+`-bs` was adopted on the strength of `./2026-11-04-backend-sampling.md` (+1.04%), and this
 profile was taken **before** it, so it no longer describes the record configuration. Re-run with
 `-bs`, same method (warm-up 64 then 400, `perf stat -p` and `perf record -F 499 -p` on the server
 main thread).

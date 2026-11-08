@@ -14,7 +14,7 @@ sitting at 30+ tokens per second for a 35B model, you are already approaching ma
 efficiency".
 
 136.5 GB/s is the theoretical LPDDR4x figure. The measured sequential GPU read ceiling on this
-board is **109.7-112 GB/s** (`findings/2026-11-02-bandwidth-and-flag-audit.md`), and decode does
+board is **109.7-112 GB/s** (`./2026-11-02-bandwidth-and-flag-audit.md`), and decode does
 not come close to it:
 
 | measurement | GB/s | share of 110 |

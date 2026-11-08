@@ -5,7 +5,7 @@ Status: prediction recorded before the run. No engine change.
 ## 1. Why this probe exists
 
 The prefill MoE is 67.7% of prefill at `-ub 32` and it reads at **56.8-59.0 GB/s** against a
-ceiling of **109.7-112 GB/s** (findings/2026-11-04-prefill-moe-tile-width.md, section 2g).
+ceiling of **109.7-112 GB/s** (./2026-11-04-prefill-moe-tile-width.md, section 2g).
 Every launch-parameter lever tried against that gap has been inert or negative:
 
 | lever | result |
@@ -113,7 +113,7 @@ So the MoE kernel's ceiling at its resident 16 warps is ~72 GB/s, and it achieve
 Next lever, recorded before it is built: halve the block tile. `I` only decides which rows a block
 owns, so `I=64` with 128 threads gives 17.6 KB per block and 5 blocks resident -- 20 warps instead
 of 16, plus 3x more block-level concurrency -- and is bit-preserving. See
-`findings/2026-11-04-prefill-mmq-tile-i64.md`.
+`./2026-11-04-prefill-mmq-tile-i64.md`.
 
 ## 6. Reproducing
 

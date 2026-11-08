@@ -212,7 +212,7 @@ kept tokens plus generated ones.
 **Why the headline 11.3x does not transfer to this board.** Their speedup is measured on one A100,
 batch 1, bf16, on Qwen3-1.7B with NIAH-16k, and it comes from two things this model does not have:
 
-1. **Quadratic attention compute.** Measured here (`findings/2026-11-04-prefill-budget.md`), at the
+1. **Quadratic attention compute.** Measured here (`./2026-11-04-prefill-budget.md`), at the
    production `-ub 32` FlashAttention is **0.9% of prefill** and the GDN core is 3.3%.
 2. **KV-cache memory.** We run `-ctk q8_0 -ctv q8_0` over 11 attention layers at 40,960 context;
    it has never been the binding constraint on this box.

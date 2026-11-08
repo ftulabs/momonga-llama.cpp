@@ -191,5 +191,5 @@ tried. At 9.5k tokens it is 4% - the two levers matter at different prompt sizes
 - A prefill trace at `-ub 32` is ~18 ubatches, and the last one is short (14 tokens here). It still
   uses MMQ, because the threshold is 64 and 14 < 64, so there is no engine mix to correct for.
 
-See also `findings/2026-11-04-prefill-starting-point.md` for the baseline and harness, and
-`findings/2026-11-03-decode-pass-budget.md` for the decode-side equivalent of this measurement.
+See also `./2026-11-04-prefill-starting-point.md` for the baseline and harness, and
+`./2026-11-03-decode-pass-budget.md` for the decode-side equivalent of this measurement.

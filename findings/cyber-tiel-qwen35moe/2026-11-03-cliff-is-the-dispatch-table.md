@@ -85,7 +85,7 @@ efficiency the op reaches at batch 4 - so this is the expected shape of the curv
 
 ## Correction to an earlier result
 
-`findings/2026-11-02-cliff-is-not-launch-geometry.md` reported that tok_in_z "leaves the
+`./2026-11-02-cliff-is-not-launch-geometry.md` reported that tok_in_z "leaves the
 cliff unchanged" and used that to conclude the pathology was not block-level. That test was
 **inert**: the env hook changed the launch geometry, but MMVQ was never selected at 5 and 6
 tokens, so the modified kernel never ran. The negative result is withdrawn. The `[tokz]

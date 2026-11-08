@@ -10,7 +10,7 @@ New record: **42.77 tok/s** median over 5 reps (NPRED=400, prompt2.txt).
 
 ## 1. Rationale and Bottleneck Analysis
 
-From the decode pass profile (`findings/2026-11-03-decode-pass-budget.md`):
+From the decode pass profile (`./2026-11-03-decode-pass-budget.md`):
 - In each speculative pass (mean length 5.68), the target model verifies 7 tokens and the MTP draft path generates up to 6 speculative candidate tokens sequentially.
 - Cyber-Tiel-Coder-35B-A3B has an unusually wide vocabulary: 248,320 tokens.
 - The shared LM head (`model.output`) in Q6_K quantization occupies **417 MB** in unified memory.

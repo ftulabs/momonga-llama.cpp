@@ -48,7 +48,7 @@ Closed as a target. The 28.05 ms is 79% of DRAM with the L1 issue rate as the bi
 constraint; a 16-block register pin at one column would be tuning the constraint that is
 already saturated. Not built, not benchmarked at the model, because the kernel needs a
 traffic reduction - which is a different type's block layout, i.e. out of bounds
-(`findings/2026-11-03-padded-block-layout-probe.md` measured the padded layout: -37% L1
+(`./2026-11-03-padded-block-layout-probe.md` measured the padded layout: -37% L1
 sectors, 18-26% slower kernels, +1.83 GB of file).
 
 The forward-looking statement from the 2026-11-03 budget remains the honest one: 83% of the

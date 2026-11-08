@@ -94,6 +94,6 @@ Inside a traced pass about **9.0 ms is not kernel time** (span 165.8 against bus
 is concentrated: one gap of 3.57 ms between two `rms_norm` launches, and six gaps of 481 us
 between `get_rows` and `rms_norm` (the six MTP draft steps, i.e. one per graph re-entry). That
 shape says CPU-side work between graph launches - sampling, acceptance, `seq_rm` - rather than
-anything GPU. Per `findings/2026-11-03-dense-mmvq-rows-per-block.md`, gaps in a traced run are
+anything GPU. Per `./2026-11-03-dense-mmvq-rows-per-block.md`, gaps in a traced run are
 not trustworthy as absolute numbers, so this is a lead and not a budget: it needs an untraced
 method before it becomes a target.

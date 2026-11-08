@@ -30,8 +30,8 @@ replaces them follows.
    `GGML_CUDA_SMALLK` and `GGML_CUDA_OP_TIME` must all be unset for the documented numbers to
    apply. If a hook is added, it defaults to upstream behaviour or it is not added.
 8. **Update documentation with every finding or code change.** Whenever an experiment is completed
-   or code is modified, write the finding in `findings/YYYY-MM-DD-<topic>.md`, update `FINDINGS.md`,
-   `findings/README.md`, `TODO.md`, `KNOWN-GOOD.md`, `AGENTS.md`, `README.md`, and `JETSON-XAVIER.md`,
+   or code is modified, write the finding in `findings/<model-architecture>/YYYY-MM-DD-<topic>.md`, update `FINDINGS.md`,
+   `findings/README.md`, `OPTIMIZATION-GUIDE.md`, `TODO.md`, `KNOWN-GOOD.md`, `AGENTS.md`, `README.md`, and `JETSON-XAVIER.md`,
    and commit to `origin`. Stale documentation wastes expensive GPU cycles.
 
 ---
@@ -75,13 +75,15 @@ Or run manual CMake and server commands as documented in [README.md](README.md).
 
 All documentation and measurement records live **directly inside this repository**:
 
+- [OPTIMIZATION-GUIDE.md](OPTIMIZATION-GUIDE.md): Cross-architecture optimization playbook, recipes, and decision tree for agents.
 - [KNOWN-GOOD.md](KNOWN-GOOD.md): Validated best configuration and reproduction line.
 - [FINDINGS.md](FINDINGS.md): Chronology and executive summary of all experiments.
-- [findings/](findings/): Complete directory of 55+ dated experiment logs.
+- [findings/](findings/): Complete directory of experimental records organized by architecture.
+  - [findings/cyber-tiel-qwen35moe/](findings/cyber-tiel-qwen35moe/): 58 dated reports on the completed Cyber-Tiel-Coder-35B-A3B / Qwen3.5-35B-A3B MTP campaign.
 - [TODO.md](TODO.md): Task roadmap and closed-do-not-retest register.
 - [HANDOFF.md](HANDOFF.md): Engineering handoff notes, machine telemetry, and profiling instructions.
 - [JETSON-XAVIER.md](JETSON-XAVIER.md): Comprehensive deep dive into sm_72 CUDA kernels.
 
 ## Maintenance and Rebase
 
-`README.md`, `AGENTS.md`, `JETSON-XAVIER.md`, `KNOWN-GOOD.md`, `FINDINGS.md`, `TODO.md`, `HANDOFF.md`, and `findings/` are fork-owned and will conflict when rebasing onto upstream. Keep the fork version (`git checkout --ours <file>`). Everything else in the tree stays aligned with upstream.
+`README.md`, `AGENTS.md`, `OPTIMIZATION-GUIDE.md`, `JETSON-XAVIER.md`, `KNOWN-GOOD.md`, `FINDINGS.md`, `TODO.md`, `HANDOFF.md`, and `findings/` are fork-owned and will conflict when rebasing onto upstream. Keep the fork version (`git checkout --ours <file>`). Everything else in the tree stays aligned with upstream.

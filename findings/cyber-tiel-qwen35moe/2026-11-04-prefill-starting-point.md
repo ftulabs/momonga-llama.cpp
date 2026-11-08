@@ -63,7 +63,7 @@ that starts at process launch is load (~5-6 min from emmc) + capture (~5 s) + pr
 ## 3. The code audit: which prefill paths exclude Volta
 
 Decode is MMVQ throughout and MMQ is prompt processing (established 2026-11-03,
-`findings/2026-11-03-mmwq-launch-params.md`). The prefill paths are a different set of kernels,
+`./2026-11-03-mmwq-launch-params.md`). The prefill paths are a different set of kernels,
 and **two of the three have an architecture gate that either excludes sm_72 or feeds it a table
 tuned for another chip** - the same shape as the two bugs already fixed in this fork.
 

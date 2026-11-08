@@ -127,10 +127,12 @@ env -u GGML_CUDA_DISABLE_GRAPHS \
 
 All experimental records, hardware investigations, and configurations are maintained directly inside this repository:
 
+- [OPTIMIZATION-GUIDE.md](OPTIMIZATION-GUIDE.md): Cross-architecture optimization playbook, profiling guide, and kernel recipes.
 - [KNOWN-GOOD.md](KNOWN-GOOD.md): The single source of truth for the validated best configuration.
 - [JETSON-XAVIER.md](JETSON-XAVIER.md): Comprehensive deep dive into the sm_72 CUDA kernels and architectural changes.
 - [FINDINGS.md](FINDINGS.md): Executive summary and timeline of every experiment.
-- [findings/](findings/): Complete archive of 55+ detailed, dated measurement logs and microbenchmarks.
+- [findings/](findings/): Complete archive of detailed, dated measurement logs and microbenchmarks partitioned by architecture:
+  - [findings/cyber-tiel-qwen35moe/](findings/cyber-tiel-qwen35moe/): 58 dated reports on the completed Cyber-Tiel-Coder-35B-A3B / Qwen3.5-35B-A3B MTP campaign.
 - [TODO.md](TODO.md): Task list, roadmap, and the "Closed - do not re-test" register.
 - [HANDOFF.md](HANDOFF.md): Engineering handoff notes, machine quirks, and profiling instructions.
 - [AGENTS.md](AGENTS.md): Guidelines and discipline rules for AI agents and contributors working in this repository.
@@ -147,7 +149,7 @@ git rebase upstream/master
 git push origin master    # fast-forward
 ```
 
-Documentation files (`README.md`, `AGENTS.md`, `JETSON-XAVIER.md`, `KNOWN-GOOD.md`, `FINDINGS.md`, `TODO.md`, `HANDOFF.md`, and `findings/`) are fork-owned. On rebase conflicts, preserve this fork's documentation (`git checkout --ours <doc>`).
+Documentation files (`README.md`, `AGENTS.md`, `OPTIMIZATION-GUIDE.md`, `JETSON-XAVIER.md`, `KNOWN-GOOD.md`, `FINDINGS.md`, `TODO.md`, `HANDOFF.md`, and `findings/`) are fork-owned. On rebase conflicts, preserve this fork's documentation (`git checkout --ours <doc>`).
 
 ---
 

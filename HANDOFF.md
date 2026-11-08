@@ -51,7 +51,7 @@ app and this repo's prose; `bench/run-mtpdump.sh` dumps `(h, token_in, argmax)` 
 `/mnt/ssd/models/_mtp/dumps/`, resumable at any shard boundary, `--batch 8` to match the 6-7-wide
 verify pass. Nothing in the training path depends on a notification; the dump is on disk. The two shipped
 profiles themselves are in `KNOWN-GOOD.md` ("The best configuration" and "The MTP-free profile") and
-`findings/2026-11-05-mtp-free-campaign.md` sections 18-23.
+`findings/cyber-tiel-qwen35moe/2026-11-05-mtp-free-campaign.md` sections 18-23.
 
 Read this file, then `AGENTS.md` (behaviours and traps), then `TODO.md` ("Closed - do not
 re-test"), then `findings/`. `KNOWN-GOOD.md` is the configuration that is actually shipped.
@@ -104,7 +104,7 @@ The two sweeps finished on 2026-11-04. **The board is free, no sweeps are queued
 lever is settled for the MTP configuration: it stays at `-ub 32 -b 32`.** (Without MTP the width
 is free - see section 1. The two statements are about different configurations, not a
 contradiction.) Full write-up in
-`findings/2026-11-04-prefill-starting-point.md` sections 7.1-7.2; raw rows in `bench/results.csv`,
+`findings/cyber-tiel-qwen35moe/2026-11-04-prefill-starting-point.md` sections 7.1-7.2; raw rows in `bench/results.csv`,
 `bench/spec.csv`, `bench/prefill.csv`.
 
 | ub | prefill at 590 / 2,385 / 9,563 tok/s | speedup | acceptance | mean len | decode TG |
@@ -176,7 +176,7 @@ the host is idle, and a cold page cache costs only 5.1%. Storage, binary, flags,
 rate have each been eliminated; what is left is where the 18 GB model allocation lands, which is not
 controllable here. **Quote prefill as a range, and compare only arms measured in the same server
 load; a prefill delta below the session floor (0.56% at 9.5k, 1.6% at 2,385, 2.1% at 590) is not
-evidence.** See `findings/2026-11-05-prefill-page-cache.md` section 3c.
+evidence.** See `findings/cyber-tiel-qwen35moe/2026-11-05-prefill-page-cache.md` section 3c.
 
 **What is left after that, honestly:** the MMQ tile geometry (`I`, `nthreads`, `J`, carveout) is
 closed as inert - `I` 64 buys 4 more resident warps and measures -0.11 / -0.03 / -0.28% at the
@@ -187,7 +187,7 @@ width family is closed too (2026-11-05):** 33-63 was the last untested range, `-
 **36 = 0.88779** and **40 = 0.70755**, so every width above 32 breaks it and the map is not
 monotone. The only remaining prefill lever that is not a rewrite is the `-ub` exchange at 96/128
 (1.28x / 1.45x prefill for a decode loss), which the user has held in reserve.
-See `findings/2026-11-05-prefill-ubatch-intermediate.md`.
+See `findings/cyber-tiel-qwen35moe/2026-11-05-prefill-ubatch-intermediate.md`.
 
 Harness: `bench/prefill.sh` - `cache_prompt:false` on every rep, `n_predict 1`, streams and clocks
 the first chunk client side, records the server's `prompt_n`, drops rep 1. Reproducible to
@@ -263,7 +263,7 @@ Q8_0 815 = 12.4%, Q6_K 175 = 2.7%, Q3_K 106 = 1.6%. Every launch is `J=32, fallb
   *slower* in both orders. What is left is the same wall decode hit - at a bit-preserving 32-token
   ubatch each expert's weights are streamed for about one token of work.
 
-**Full detail in `findings/2026-11-04-prefill-budget.md`**; the tool is `bench/prof-prefill.sh`
+**Full detail in `findings/cyber-tiel-qwen35moe/2026-11-04-prefill-budget.md`**; the tool is `bench/prof-prefill.sh`
 plus `bench/nsys-kernels.py`. Arithmetic at 590 tokens: **1% of prefill = 66 ms of TTFT**, the
 GDN-free floor is ~7,100 ms, MMQ -10% is ~6,910 ms, MMQ -25% is ~6,040 ms.
 
@@ -346,7 +346,7 @@ The gate before any training was `mtp_head_torch.py --parity`. Evaluated on `ml`
 tie-breaking on the 256-expert router at delta <= 0.0002 margins between Volta FP16 accumulation
 and Turing FP32 dequantization (pos 177 delta is 8e-6). Non-divergence across all 256 positions
 confirms mathematical parity within hardware precision limits. Gate authorized and Phase 1 training
-cleared. See `findings/2026-11-07-mtp-parity-gate-analysis.md`.
+cleared. See `findings/cyber-tiel-qwen35moe/2026-11-07-mtp-parity-gate-analysis.md`.
 
 Phase 1 retraining (35.66M dense/norm parameters, MoE experts frozen) completed on `aorus-ts` (Tesla K80)
 across 3,000,519 tokens (val CE 0.8005, argmax agreement 80.88%). The weights were exported to
@@ -356,7 +356,7 @@ across 3,000,519 tokens (val CE 0.8005, argmax agreement 80.88%). The weights we
 over the 0.64583 factory baseline and **24.9% slower** than plain decode (27.86 tok/s). Freezing 98%
 of the block's capacity (1.826B MoE expert parameters) while adapting front-end dense layers distorts
 representations entering the router, and teacher-forced single-step loss on code does not translate
-to 6-step autoregressive drafting on prose. See `findings/2026-11-07-mtp-phase1-deployment-results.md`.
+to 6-step autoregressive drafting on prose. See `findings/cyber-tiel-qwen35moe/2026-11-07-mtp-phase1-deployment-results.md`.
 
 ---
 
@@ -444,8 +444,8 @@ to 6-step autoregressive drafting on prose. See `findings/2026-11-07-mtp-phase1-
 The three failed requant builds (61 GB) and the two comparison source trees (3.9 GB,
 `beellama.cpp/`, `jusko-llama-volta-qwen3flash/`) were deleted with explicit confirmation on
 2026-11-02 and 2026-11-03. `bench/sweep-fork.sh` no longer runs. Do not rebuild either tree - what
-they offered is recorded in `findings/2026-10-14-builds-quants-and-models.md` and
-`findings/2026-11-02-forks-and-kernels.md`.
+they offered is recorded in `findings/cyber-tiel-qwen35moe/2026-10-14-builds-quants-and-models.md` and
+`findings/cyber-tiel-qwen35moe/2026-11-02-forks-and-kernels.md`.
 
 ---
 
@@ -492,9 +492,9 @@ reference, and the T4 can only host Volta-schedule development.**
 | How do I measure without fooling myself? | `AGENTS.md` section 3; `TODO.md` "How to Measure" |
 | What is the open work, ranked, with predictions? | `TODO.md` "Prefill / TTFT Marathon" |
 | What has already been tried and must not be retried? | `TODO.md` "Closed - Do Not Re-test" |
-| Where does the time actually go in a decode pass? | `findings/2026-11-03-decode-pass-budget.md`, `findings/2026-11-03-moe-share-in-situ.md` |
-| Baseline, code audit and H1-H5 for prefill | `findings/2026-11-04-prefill-starting-point.md` |
-| Where the time actually goes in a prefill (H2, the per-kernel budget) | `findings/2026-11-04-prefill-budget.md` |
-| Why weights cannot be requantized | `findings/2026-11-02-requant-anchored-ab.md`, `findings/2026-11-03-lmhead-q5k.md` |
-| Environment traps, counters, profilers | `AGENTS.md` sections 4-5, `findings/2026-11-03-counters-on-xavier.md` |
+| Where does the time actually go in a decode pass? | `findings/cyber-tiel-qwen35moe/2026-11-03-decode-pass-budget.md`, `findings/cyber-tiel-qwen35moe/2026-11-03-moe-share-in-situ.md` |
+| Baseline, code audit and H1-H5 for prefill | `findings/cyber-tiel-qwen35moe/2026-11-04-prefill-starting-point.md` |
+| Where the time actually goes in a prefill (H2, the per-kernel budget) | `findings/cyber-tiel-qwen35moe/2026-11-04-prefill-budget.md` |
+| Why weights cannot be requantized | `findings/cyber-tiel-qwen35moe/2026-11-02-requant-anchored-ab.md`, `findings/cyber-tiel-qwen35moe/2026-11-03-lmhead-q5k.md` |
+| Environment traps, counters, profilers | `AGENTS.md` sections 4-5, `findings/cyber-tiel-qwen35moe/2026-11-03-counters-on-xavier.md` |
 | Everything, indexed | `FINDINGS.md`, `findings/README.md` |

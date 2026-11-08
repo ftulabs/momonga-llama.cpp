@@ -29,7 +29,7 @@ cost 0.03-0.06 ms each. The 5th costs 0.51. The 6th drops back to 0.14.
 hardware; llama.cpp PR #31268 reports +38% on Orin from changing rows and warps per block. On
 Volta a block covers only ~2 KB of weights, so more rows per warp looked like it should hide
 more latency. The prediction, written to disk first
-(`findings/2026-11-02-rpb-prediction.md`), was **15-30% faster gate/up verify time**, with the
+(`./2026-11-02-rpb-prediction.md`), was **15-30% faster gate/up verify time**, with the
 cliff softened but not removed.
 
 Hook `GGML_CUDA_MMID_RPB` in place, gate/up, ms, IQ3_S / IQ4_XS:

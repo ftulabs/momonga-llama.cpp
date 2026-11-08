@@ -58,7 +58,7 @@ because the cross-warp reduction buffer is
 `__shared__ float tmp_shared[nwarps-1][ncols_dst][rows_per_cuda_block][warp_size]` floats:
 at 7 columns and 4 rows that is 3.58 KB per block, and the driver picks a **16.38 KB**
 shared-memory carveout by default, which caps residency at 4 blocks. The earlier attempt
-measured +46% and was reverted (`findings/2026-11-03-mmwq-launch-params.md` section 3). The
+measured +46% and was reverted (`./2026-11-03-mmwq-launch-params.md` section 3). The
 conclusion recorded then - "occupancy is not the binding constraint at this shape, L1 throughput
 is, so a change that trades L1 traffic for occupancy loses" - was half right: the trade was
 forced by the carveout, not by the layout.
