@@ -23,7 +23,7 @@ On embedded SoCs (Jetson AGX Xavier, Orin, Apple Silicon):
 
 ---
 
-## 2. The Seven Golden Rules of Measurement Discipline
+## 2. The Eight Golden Rules of Measurement Discipline
 
 Every single optimization trap encountered in this project came from violating one of these discipline rules. Treat them as non-negotiable.
 
@@ -54,6 +54,14 @@ A kernel that wins at batch size 5 or 7 may lose at batch size 1 or 4. Matrix-ve
 
 ### Rule 7: Verify GGUF Artifacts Before Benchmarking
 When modifying tensor formats or quantizing individual layers, parse the GGUF header and verify tensor types, counts, and byte offsets. A failed override produces a plausible file that silently measures the wrong baseline.
+
+### Rule 8: Adopt ServerBench Rejection Hierarchy & Latency-Qualified Scoring
+Following ServerBench (arXiv:2611.06841), an optimization must follow a strict hierarchy of checks:
+1. Compilation: The binary builds cleanly without warnings.
+2. Dispatch: The kernel is actually invoked on the runtime target shapes.
+3. Numerical Parity: Exact greedy match or verified draft acceptance against the baseline.
+4. Microbenchmark: Evaluates Amdahl's Law ceiling 1 / (1 - f + f/s). A microbenchmark can only REJECT a candidate; it can NEVER ACCEPT one.
+5. Scored End-to-End Scenario: The only test that can accept a candidate is a full multi-turn replay under realistic SLA constraints (p90 TTFT and p90 TPOT). An optimization that degrades draft acceptance or misses latency SLAs scores 0 useful tokens.
 
 ---
 
@@ -202,3 +210,43 @@ Follow this sequence when picking up a new model on edge hardware:
   |-- Decouple prefill ubatch (-ub 1024/2048) from decode.
   `-- For extreme long context, deploy dynamic sparsity (TokenGate).
 ```
+
+---
+
+## 9. ServerBench Evaluation Protocol (arXiv:2611.06841)
+
+To prevent premature optimization and false microbenchmark wins, all model and runtime configurations are evaluated using the ServerBench methodology adapted for edge deployment.
+
+### 9.1 From Raw Throughput to Latency-Qualified Serving
+Raw decode throughput (tok/s) is necessary but insufficient. A server that delivers high aggregate throughput but exhibits excessive Time To First Token (TTFT) or periodic speculative pauses will violate interactive SLAs:
+- **p90 TTFT SLA:** Time to generate the first token must satisfy interactive bounds (e.g. <= 1.0 s for cached turns, <= 6.0 s for fresh prefill).
+- **p90 TPOT SLA:** 90th percentile inter-token latency (Time Per Output Token) must remain bounded (e.g. <= 125 ms on 35B models on Xavier).
+- **Correctness Gate:** Generations must complete without empty responses, syntax truncation, or lost context needles.
+- **Latency-Qualified Tokens (LQT):** A request earns billable tokens (input + output) IF AND ONLY IF it satisfies both TTFT and TPOT latency targets AND passes correctness verification. Requests failing either bar score 0 tokens.
+
+### 9.2 Edge Economic Objective: Tokens per Joule ("Dollars-per-Dollar")
+In cloud datacenters, ServerBench evaluates *dollars-per-dollar* (revenue over GPU rental cost). On embedded edge hardware (Jetson AGX Xavier), operating cost is governed by **energy consumption (Joules)**:
+
+$$\text{Tokens per Joule} = \frac{\text{SLO-Qualified Billable Tokens}}{\text{Total Energy Consumed (Joules)}}$$
+
+$$\text{Total Energy} = \int P_{\text{total}}(t) \, dt = \sum P_i \, \Delta t$$
+
+Power is sampled in real-time via `sudo tegrastats` by summing active hardware rails:
+$$P_{\text{total}} = P_{\text{GPU}} + P_{\text{CPU}} + P_{\text{SOC}} + P_{\text{CV}} + P_{\text{VDDRQ}} + P_{\text{SYS5V}}$$
+
+### 9.3 Stateful Workload Replay Harness (`bench/serverbench_eval.py`)
+Workload sessions (`bench/workloads/serverbench_coding_sessions.json`) test real agentic interaction patterns:
+1. **Multi-turn code refactoring:** Turns 2 and 3 evaluate prefix-cache hit rates (`cache_prompt: true`), testing sub-second TTFT.
+2. **Needle retrieval in long context:** Evaluates retrieval fidelity under TokenGate / KV compression.
+3. **Interactive coding commands:** Evaluates burst TPOT and syntax validity.
+
+Run the evaluation against any active server:
+```bash
+python3 bench/serverbench_eval.py \
+  --port 8080 \
+  --name "candidate-config-name" \
+  --p90-ttft 6.0 \
+  --p90-tpot 125.0 \
+  --out-csv bench/serverbench_results.csv
+```
+Results are appended to `bench/serverbench_results.csv` and output in a structured scorecard reporting Attainment Rate (%), LQT/s, Mean Power (W), and Tokens-per-Joule.

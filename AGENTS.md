@@ -33,6 +33,8 @@ replaces them follows.
    or code is modified, write the finding in `findings/<model-architecture>/YYYY-MM-DD-<topic>.md`, update `FINDINGS.md`,
    `findings/README.md`, `OPTIMIZATION-GUIDE.md`, `TODO.md`, `KNOWN-GOOD.md`, `AGENTS.md`, `README.md`, and `JETSON-XAVIER.md`,
    and commit to `origin`. Stale documentation wastes expensive GPU cycles.
+9. **Adopt ServerBench Rejection Hierarchy & Latency-Qualified Scoring (arXiv:2611.06841).**
+   A microbenchmark can only reject a candidate; it can never accept one. Only an end-to-end scored scenario with independent correctness verification and SLA attainment (p90 TTFT and p90 TPOT) can accept a candidate. Throughput must be evaluated alongside energy efficiency (Tokens per Joule via `tegrastats` power rails) using `bench/serverbench_eval.py`.
 
 ---
 
