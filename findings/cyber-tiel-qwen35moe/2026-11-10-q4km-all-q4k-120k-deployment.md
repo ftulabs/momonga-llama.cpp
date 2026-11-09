@@ -35,7 +35,7 @@ LOAD_ARGS=--load-mode none
 
 MODEL_PATH=/mnt/ssd/models/Q4KM-all-q4k.gguf
 MMPROJ_PATH=/mnt/ssd/models/mmproj-Ornith-1.5-35B-BF16.gguf
-MODEL_ALIAS=Q4KM-all-q4k
+MODEL_ALIAS="Cyber Tiel 35B A3B"
 
 HOST=0.0.0.0
 PORT=8800
