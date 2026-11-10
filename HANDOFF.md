@@ -432,14 +432,18 @@ to 6-step autoregressive drafting on prose. See `findings/cyber-tiel-qwen35moe/2
 
 ## 10. Disk and models
 
-`/home` is 234 GB with about 77 GB free. On disk:
+`/mnt/ssd/models` (symlinked as `/home/triph/models`) has about 101 GB free. On disk:
 
 | file | size | keep? |
 |---|---|---|
-| `Cyber-Tiel-Coder-35B-A3B-MTP-UD-IQ4_XS.gguf` | 18.12 GB | **yes**, this is the control |
-| `Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_M.gguf` | 22.52 GB | **yes**, only higher-precision source on disk |
+| `Cyber-Tiel-35B-A3B-Q4KM-tg.gguf` | 20.46 GB | **yes**, current active production model (Q4KM + Layer 3 TokenGate) |
+| `Cyber-Tiel-Coder-35B-A3B-tg.gguf` | 18.12 GB | **yes**, IQ4_XS + TokenGate reference |
+| `qwen36-35b-a3b-tg-g3-IQ4_XS.gguf` | 18.21 GB | **yes**, Qwen 3.6 reference and TokenGate donor |
+| `Q4KM-all-q4k.gguf` | 20.46 GB | base un-grafted Q4KM (loaded in Unsloth Studio PID 140714) |
 | `Ornith-1.5-35B-A3B-DFlash-BF16.gguf` | 0.78 GB | draft sidecar, tested and lost to MTP |
 | `Spark-X2.6-4B-Q4_0.gguf`, `-Q8_0.gguf` | 6.8 GB | unrelated small model |
+
+The old vanilla models (`Cyber-Tiel-Coder-35B-A3B-MTP-UD-IQ4_XS.gguf` [18.12 GB] and `Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_M.gguf` [22.52 GB]) were deleted on 2026-11-10, freeing 40.64 GB.
 
 The three failed requant builds (61 GB) and the two comparison source trees (3.9 GB,
 `beellama.cpp/`, `jusko-llama-volta-qwen3flash/`) were deleted with explicit confirmation on
