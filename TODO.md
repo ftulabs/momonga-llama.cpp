@@ -35,6 +35,26 @@ Q4_K_M file, each measured A/B/B/A: 22.25 -> 27.86 tok/s (+25.2%) for +1.67% per
 
 ---
 
+## zerank-2 Reranker Optimization (Completed 2026-11-10)
+
+- **Target:** `zeroentropy/zerank-2-reranker` (4.0B dense Qwen3 architecture, Q8_0 GGUF).
+- **Status:** **Completed & Verified in Production**.
+- **Results:**
+  - **177.87 ms median doc latency** (1,780 ms per 10-document query).
+  - **223.7 tokens/sec**, **5.61 docs/sec**.
+  - **100.0% Top-1 accuracy** on cross-domain multi-document evaluation.
+  - **Edge Economic Objective:** 28.73 W, 7.80 Tokens/Joule, 0.195 Docs/Joule (ServerBench).
+- **Key Changes Implemented:**
+  - Fixed bogus softmax score bug (~1e-31) in `src/llama-graph.cpp` when `cls_out` is absent.
+  - Sliced target token 9454 (`"Yes"`) row view via `ggml_view_2d` from `tok_embd`, eliminating 160,000x LM head compute/buffer waste (~400 MB DRAM read and 640 MiB buffer saved per pass).
+  - Broadened sm_72 Volta equality checks across `common.cuh`, `fattn.cu`, `mmvq.cu`, and `ggml-cuda.cu`, unlocking Volta HMMA Tensor Core FlashAttention.
+  - Integrated official ZeroEntropy ChatML template auto-formatting and sigmoid probability calibration ($\sigma(\text{logit}/5.0)$).
+  - Removed arbitrary `n_batch = n_ubatch` clamping for causal rerankers in `server.cpp` and `common.cpp`.
+  - Pinned `-c 8192` to avoid 48 GB OOM on Xavier.
+  - Script: `bench/run-rerank.sh`.
+
+---
+
 ## Prefill / TTFT Marathon (active, 2026-11-04)
 
 **Score to beat. Updated 2026-11-04 by the adopted MoE tile-width change** (H3, below): prefill,

@@ -3030,7 +3030,13 @@ private:
                 continue;
             }
 
-            res->score = embd[0];
+            float raw_score = embd[0];
+            if (llama_model_rerank_token_id(model_tgt) >= 0) {
+                // Calibrate generative reranker logits using official ZeroEntropy temperature 5.0
+                res->score = 1.0f / (1.0f + expf(-raw_score / 5.0f));
+            } else {
+                res->score = raw_score;
+            }
         }
 
         SLT_DBG(slot, "sending rerank result, res.score = %f\n", res->score);
@@ -7600,6 +7606,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_rerank_impl(const se
             auto tmp = format_prompt_rerank(ctx_server.model_tgt, ctx_server.vocab, ctx_server.mctx, query_str, documents[i], query_files, document_files[i], ctx_server.init_opt);
             server_task task = server_task(SERVER_TASK_TYPE_RERANK);
             task.id     = rd.get_new_id();
+            task.index  = (int) i;
             task.tokens = std::move(tmp);
             tasks.push_back(std::move(task));
         }

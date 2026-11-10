@@ -4527,10 +4527,22 @@ void llm_graph_context::build_pooling(
                     if (cls_out_b) {
                         cur = ggml_add(ctx0, cur, cls_out_b);
                     }
+                } else if (hparams.rerank_token_id >= 0) {
+                    // Causal generative reranker: project using only the target token row (e.g. 9454 for "Yes")
+                    // Avoids 151,936x full vocab projection (~400 MB DRAM read and 640 MiB compute buffer per pass)
+                    ggml_tensor * head_w = model.output ? model.output : model.tok_embd;
+                    GGML_ASSERT(head_w != nullptr);
+                    const size_t offset = (size_t)hparams.rerank_token_id * head_w->nb[1];
+                    ggml_tensor * row_view = ggml_view_2d(ctx0, head_w, hparams.n_embd, 1, head_w->nb[1], offset);
+                    row_view->buffer = head_w->buffer;
+                    if (head_w->data) {
+                        row_view->data = (char *)head_w->data + offset;
+                    }
+                    cur = ggml_mul_mat(ctx0, row_view, cur);
                 }
 
-                // softmax for qwen3 reranker
-                if (arch == LLM_ARCH_QWEN3 || arch == LLM_ARCH_QWEN3VL) {
+                // softmax for qwen3 reranker (only for multi-class classification head, n_cls_out > 1)
+                if ((arch == LLM_ARCH_QWEN3 || arch == LLM_ARCH_QWEN3VL) && cls_out != nullptr && hparams.n_cls_out > 1) {
                     cur = ggml_soft_max(ctx0, cur);
                 }
             } break;

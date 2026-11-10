@@ -1646,6 +1646,24 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
         hparams.n_cls_out = classifier_labels.size();
     }
 
+    // for generative causal rerankers (e.g. zerank-2)
+    ml.get_key(LLM_KV_RERANK_TRUE_TOKEN_ID, hparams.rerank_token_id, false);
+    if (hparams.rerank_token_id < 0) {
+        std::string general_name;
+        ml.get_key(LLM_KV_GENERAL_NAME, general_name, false);
+        auto it_bn = gguf_kv.find("general.basename");
+        std::string general_basename = (it_bn != gguf_kv.end()) ? it_bn->second : "";
+        if (general_basename.find("zerank") != std::string::npos ||
+            general_name.find("zerank") != std::string::npos ||
+            general_name.find("Zerank") != std::string::npos) {
+            hparams.rerank_token_id = 9454;
+            LLAMA_LOG_INFO("%s: detected zerank-2 model, setting rerank_token_id = %d\n", __func__, hparams.rerank_token_id);
+        }
+    }
+    if (hparams.rerank_token_id >= 0) {
+        hparams.n_cls_out = 1;
+    }
+
     // for decision models
     ml.get_arr(LLM_KV_DECISION_LABELS, decision_labels, false);
 
@@ -3675,6 +3693,10 @@ uint32_t llama_model_n_cls_out(const struct llama_model * model) {
     return model->hparams.n_cls_out;
 }
 
+int32_t llama_model_rerank_token_id(const struct llama_model * model) {
+    return model->hparams.rerank_token_id;
+}
+
 const char * llama_model_cls_label(const struct llama_model * model, uint32_t i) {
     if (i < model->classifier_labels.size()) {
         return model->classifier_labels[i].c_str();
@@ -3999,6 +4021,10 @@ const char * llama_model_chat_template(const llama_model * model, const char * n
         : LLM_KV(model->arch)(LLM_KV_TOKENIZER_CHAT_TEMPLATE);
     const auto & it = model->gguf_kv.find(key);
     if (it == model->gguf_kv.end()) {
+        if (name && strcmp(name, "rerank") == 0 && model->hparams.rerank_token_id >= 0) {
+            return "<|im_start|>system\n{query}<|im_end|>\n<|im_start|>user\n{document}<|im_end|>\n<|im_start|>assistant\n";
+        }
+
         // one-off fix for very popular models (so we are not flooded with issues)
         // do not extend this list unless absolutely necessary
         // Mistral-Small-2503 does not have built-in chat template

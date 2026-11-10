@@ -1,0 +1,1 @@
+../bench/run-rerank.sh

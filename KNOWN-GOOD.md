@@ -332,7 +332,44 @@ its own, so the pass moves about **8.1 GB** (MoE 3.1, lm_head 2.9, dense q8_0 2.
 ## Where this is recorded
 
 - [findings/README.md](findings/README.md) - index and measurement conventions
+- [findings/zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md](findings/zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md) - **zerank-2 generative causal reranker optimization and edge evaluation**
 - [findings/cyber-tiel-qwen35moe/2026-11-01-decode-speed-tuning.md](findings/cyber-tiel-qwen35moe/2026-11-01-decode-speed-tuning.md) - how the configuration was found
 - [findings/cyber-tiel-qwen35moe/2026-11-02-bandwidth-and-flag-audit.md](findings/cyber-tiel-qwen35moe/2026-11-02-bandwidth-and-flag-audit.md) - bandwidth ceiling, flag audit, upstream triage
 - [findings/cyber-tiel-qwen35moe/2026-11-03-decode-pass-budget.md](findings/cyber-tiel-qwen35moe/2026-11-03-decode-pass-budget.md) - **where the 163 ms pass actually goes.** Read this before choosing any kernel work: MoE experts 38.7%, lm_head 25.2%, dense q8_0 19.6%. If a proposed optimisation is not in one of those three, it cannot be worth more than 1-2%.
 - [TODO.md](TODO.md) - what is genuinely still open
+
+---
+
+# Known good: zerank-2 Reranker (177.87 ms/doc, 223.7 tok/s, 7.80 tok/J)
+
+**Status:** 2026-11-10, on `zerank-2-Q8_0.gguf` (4.0B dense Qwen3 architecture).
+- **Model:** `/mnt/ssd/cache/huggingface/hub/models--mradermacher--zerank-2-GGUF/blobs/7b9ba05a0509151c911582a4d62b14003f6a4fafa0e7ccdf572c7598cde1c100`
+- **Median doc latency:** **177.87 ms/doc** (1,780 ms for 10-document batch containing ~400 tokens)
+- **Token throughput:** **223.7 tokens/sec**
+- **Document throughput:** **5.61 docs/sec**
+- **Top-1 accuracy:** **100.0%** on multi-domain benchmark (Geography, Code, Earth Science, AI)
+- **Power & Energy:** **28.73 W** average power, **7.80 Tokens/Joule**, **0.195 Docs/Joule** (ServerBench arXiv:2611.06841)
+- **Optimizations active:** Target token 9454 (`"Yes"`) logit slice projection via `ggml_view_2d` (eliminates 160,000x LM head compute buffer and DRAM bandwidth waste), Volta sm_72 Tensor Core MMA instructions enabled (`VOLTA_MMA_AVAILABLE`), specialized GQA FlashAttention dispatch, ZeroEntropy ChatML template auto-formatting, calibrated sigmoid probability scoring ($\sigma(\text{logit}/5.0)$).
+
+## Run it
+
+```bash
+bench/run-rerank.sh
+```
+
+Or directly via `llama-server`:
+```bash
+./build-volta/bin/llama-server \
+  -m /mnt/ssd/cache/huggingface/hub/models--mradermacher--zerank-2-GGUF/blobs/7b9ba05a0509151c911582a4d62b14003f6a4fafa0e7ccdf572c7598cde1c100 \
+  --reranking \
+  -fa on \
+  -ngl 99 \
+  -c 8192 \
+  -np 4 \
+  -ub 1024 \
+  -b 2048 \
+  --port 8012 \
+  --host 0.0.0.0
+```
+*(Note: Pinning `-c 8192` is mandatory on Xavier to prevent default unpinned auto-allocation of 48 GB KV cache).*
+

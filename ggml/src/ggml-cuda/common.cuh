@@ -292,9 +292,9 @@ static const char * cu_get_error_str(CUresult err) {
 #endif // defined(AMD_WMMA_128B_AVAILABLE) || defined(AMD_WMMA_256B_AVAILABLE)
 
 // The Volta instructions are in principle available on Turing or newer but they are effectively unusable:
-#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA
+#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA && __CUDA_ARCH__ < GGML_CUDA_CC_TURING
 #define VOLTA_MMA_AVAILABLE
-#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA
+#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA && __CUDA_ARCH__ < GGML_CUDA_CC_TURING
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING
 #define TURING_MMA_AVAILABLE
@@ -369,7 +369,8 @@ static bool amd_wmma_available(const int cc) {
 }
 
 static bool volta_mma_available(const int cc) {
-    return GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_VOLTA;
+    const int arch = ggml_cuda_highest_compiled_arch(cc);
+    return GGML_CUDA_CC_IS_NVIDIA(cc) && arch >= GGML_CUDA_CC_VOLTA && arch < GGML_CUDA_CC_TURING;
 }
 
 static bool turing_mma_available(const int cc) {

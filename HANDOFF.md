@@ -30,6 +30,15 @@ dropped, `-ub` becomes a free prefill parameter. Two configurations, both curren
   **23.351 tok/s against 27.86 plain, -16.2%**. The two profiles are exclusive, not additive; the
   retyped file runs `--spec-type none`.
 
+- **A third, dedicated profile exists as of 2026-11-10: zerank-2 Causal Reranker.**
+  `zeroentropy/zerank-2-reranker` (4.0B dense Qwen3 architecture, Q8_0 GGUF). Native causal cross-encoder
+  scoring via target token 9454 (`"Yes"`) logit view projection, bypassing 160,000x LM head compute/buffer waste
+  and eliminating the bogus ~1e-31 softmax score. Unlocked Volta Tensor Core HMMA and GQA flash attention on
+  sm_72 (cc 720). Delivers **177.87 ms median doc latency** (1,780 ms per 10-document query, 223.7 tok/s, 5.61 doc/s),
+  **100.0% Top-1 accuracy**, and **7.80 Tokens/Joule (0.195 Docs/Joule, 28.73 W)**.
+  Run line: `bench/run-rerank.sh` or `llama-server -m ... --reranking -fa on -ngl 99 -c 8192 -np 4 -ub 1024 -b 2048 --port 8012`.
+  Full engineering report: `findings/zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md`.
+
 Prefill and TTFT no longer separate the three quant files at all (215-221 tok/s, 52-53 s), and
 **`-ub 2048` is the widest width that measures reproducibly** - 3072 and 4096 scatter by 32-72%
 over identical loads. Anything measured at 3072 for prefill before 2026-11-05 is superseded.

@@ -22,7 +22,18 @@ Complete engineering record (58 dated reports, October 14 - November 8, 2026) fo
   - Multimodal vision projector integration (BF16 Ornith / Qwen-VL mmproj).
 - **Index:** See [cyber-tiel-qwen35moe/README.md](cyber-tiel-qwen35moe/README.md) for the full catalog of 58 dated reports.
 
-### 2. Future Architectural Campaigns
+### 2. [`zerank-2/`](zerank-2/) (Active Production Reranker)
+Complete engineering record for the **ZeroEntropy `zerank-2-reranker`** (4.0B dense Qwen3 causal cross-encoder).
+- **Milestone Reached:**
+  - **177.87 ms median document latency** (1,780 ms for 10-document batch).
+  - **223.7 tokens/sec** end-to-end throughput across HTTP `/rerank`.
+  - **100.0% Top-1 accuracy** on cross-domain multi-document ranking.
+  - **Edge Economic Objective:** 28.73 W, 7.80 Tokens/Joule, 0.195 Docs/Joule (ServerBench).
+  - Zero-copy view projection on target token 9454 (`"Yes"`), saving 160,000x LM head compute/buffer waste (~400 MB DRAM read and 640 MiB buffer per pass).
+  - Unlocked Volta Tensor Core HMMA and GQA flash attention on sm_72 (cc 720).
+- **Report:** [zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md](zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md).
+
+### 3. Future Architectural Campaigns
 Future model investigations (e.g., dense architectures like Qwen 2.5 / 3.8 27B, DeepSeek MoE, Gemma, or multimodal models) should create their own subfolder under `findings/<model-architecture>/` following the template and guidelines in [OPTIMIZATION-GUIDE.md](../OPTIMIZATION-GUIDE.md).
 
 ---

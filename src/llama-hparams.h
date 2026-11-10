@@ -274,6 +274,9 @@ struct llama_hparams {
     // for Classifiers
     uint32_t n_cls_out = 1;
 
+    // for Generative Causal Rerankers (e.g. 9454 for "Yes" in zerank-2)
+    int32_t rerank_token_id = -1;
+
     // input embedding dimension (0 = use n_embd)
     uint32_t n_embd_inp_impl = 0;
 

@@ -625,6 +625,9 @@ extern "C" {
     // Undefined behavior for non-classifier models
     LLAMA_API uint32_t llama_model_n_cls_out(const struct llama_model * model);
 
+    // Returns the token ID used for generative rerankers (e.g. 9454 for "Yes" in zerank-2). -1 if not a generative reranker
+    LLAMA_API int32_t llama_model_rerank_token_id(const struct llama_model * model);
+
     // Returns label of classifier output by index (<n_cls_out). Returns nullptr if no label provided
     LLAMA_API const char * llama_model_cls_label(const struct llama_model * model, uint32_t i);
 

@@ -117,7 +117,8 @@ static bool server_prepare_params(common_params & params, server_role_type role_
         // validate batch size for embeddings
         // embeddings require all tokens to be processed in a single ubatch
         // see https://github.com/ggml-org/llama.cpp/issues/12836
-        if (params.embedding && params.n_batch > params.n_ubatch) {
+        // causal rerankers read the last token and have a KV cache, so they can be chunked/split
+        if (params.embedding && params.pooling_type != LLAMA_POOLING_TYPE_RANK && params.n_batch > params.n_ubatch) {
             SRV_WRN("embeddings enabled with n_batch (%d) > n_ubatch (%d)\n", params.n_batch, params.n_ubatch);
             SRV_WRN("setting n_batch = n_ubatch = %d to avoid assertion failure\n", params.n_ubatch);
             params.n_batch = params.n_ubatch;
