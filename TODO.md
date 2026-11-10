@@ -35,6 +35,24 @@ Q4_K_M file, each measured A/B/B/A: 22.25 -> 27.86 tok/s (+25.2%) for +1.67% per
 
 ---
 
+## Unified `runbest/` Production Suite (Completed 2026-11-10)
+
+- **Target:** Create a turnkey, unified `runbest/` directory containing self-contained, hardware-tuned launch scripts for every verified model and workload profile on the Jetson AGX Xavier.
+- **Status:** **Completed & Verified in Production**.
+- **Delivered Runners (`runbest/`):**
+  - `run-zerank-2.sh`: zerank-2 Q8_0 causal generative reranker (Port 8012, 177.87 ms/doc, 7.80 tok/J).
+  - `run-cybertiel-35b-coder-mtp.sh`: Cyber-Tiel-Coder-35B-A3B MoE MTP Depth 6 + TokenGate + Vision (Port 8080, 48 tok/s decode, 2,070 tok/s prefill).
+  - `run-cybertiel-35b-120k.sh`: Cyber-Tiel-35B-A3B-Q4KM 120,000-token context production chat server with LoRA + Vision (Port 8800, 28 tok/s flat decode).
+  - `run-qwen36-35b-a3b.sh`: Qwen 3.6 35B A3B base MoE model with LoRA + Vision (Port 8081).
+  - `run-qwen38-27b.sh`: Qwen 3.8 27B Dense Coder (64 layers, non-MoE, Port 8083).
+  - `run-deepseek-v4-9b.sh`: DeepSeek-V4-Pro 9B Q8_0 High-Precision Reasoning (Port 8084).
+  - `run-spark-4b.sh`: Spark-X2.6 4B Edge Model (Port 8085, <80ms decode latency, <5 GB VRAM).
+  - `run-embeddinggemma-2.sh`: EmbeddingGemma-2 Multimodal Vector Embeddings (Port 8086).
+  - `list-models.sh`: Quick CLI model reference and port matrix.
+  - `README.md`: Exhaustive operational documentation and curl verification commands.
+
+---
+
 ## zerank-2 Reranker Optimization (Completed 2026-11-10)
 
 - **Target:** `zeroentropy/zerank-2-reranker` (4.0B dense Qwen3 architecture, Q8_0 GGUF).

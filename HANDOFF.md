@@ -36,8 +36,14 @@ dropped, `-ub` becomes a free prefill parameter. Two configurations, both curren
   and eliminating the bogus ~1e-31 softmax score. Unlocked Volta Tensor Core HMMA and GQA flash attention on
   sm_72 (cc 720). Delivers **177.87 ms median doc latency** (1,780 ms per 10-document query, 223.7 tok/s, 5.61 doc/s),
   **100.0% Top-1 accuracy**, and **7.80 Tokens/Joule (0.195 Docs/Joule, 28.73 W)**.
-  Run line: `bench/run-rerank.sh` or `llama-server -m ... --reranking -fa on -ngl 99 -c 8192 -np 4 -ub 1024 -b 2048 --port 8012`.
+  Run line: `bench/run-rerank.sh` or `runbest/run-zerank-2.sh`.
   Full engineering report: `findings/zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md`.
+
+- **A unified production suite exists in `runbest/` as of 2026-11-10:**
+  Turnkey, self-contained, verified launch scripts for each model and task profile on the Jetson Xavier:
+  `run-zerank-2.sh` (reranker, 8012), `run-cybertiel-35b-coder-mtp.sh` (MTP 6 coder, 8080), `run-cybertiel-35b-120k.sh` (120k chat, 8800),
+  `run-qwen36-35b-a3b.sh` (base MoE, 8081), `run-qwen38-27b.sh` (dense coder 27B, 8083), `run-deepseek-v4-9b.sh` (Q8_0 reasoning, 8084),
+  `run-spark-4b.sh` (fast edge 4B, 8085), `run-embeddinggemma-2.sh` (multimodal embedding, 8086), plus `list-models.sh` and `README.md`.
 
 Prefill and TTFT no longer separate the three quant files at all (215-221 tok/s, 52-53 s), and
 **`-ub 2048` is the widest width that measures reproducibly** - 3072 and 4096 scatter by 32-72%
