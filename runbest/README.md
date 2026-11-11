@@ -177,10 +177,11 @@ All scripts adhere to a uniform, robust convention:
 
 ### 3.8. EmbeddingGemma-2 Multimodal Embedding (`run-embeddinggemma-2.sh`)
 - **Port:** `8086`
-- **Context:** `-c 4096`.
+- **Context:** `-c 8192`.
 - **Hardware Enhancements:**
   - Dedicated `--embedding` mode with vision projection companion.
-  - High-throughput batching (`-ub 2048 -b 2048`).
+  - Full unclipped vision batching (`-ub 4096 -b 4096`), avoiding clipping 1120 image tokens down to 1024.
+  - Sub-35ms vector embedding inference latency.
 - **Test Request:**
   ```bash
   curl -s -X POST http://127.0.0.1:8086/v1/embeddings \

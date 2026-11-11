@@ -17,7 +17,7 @@ run-qwen36-35b-a3b.sh      8081  32,768    Qwen 3.6 35B A3B + LoRA + Vision  Bas
 run-qwen38-27b.sh          8083  16,384    Qwen 3.8 27B Dense Coder Q4_K_M   Dense 27B Coder (64 layers, non-MoE)
 run-deepseek-v4-9b.sh      8084  16,384    DeepSeek-V4-Pro 9B Q8_0           Dense 9B Zero-Loss Reasoning
 run-spark-4b.sh            8085  16,384    Spark-X2.6 4B Q8_0                Ultra-Fast Edge Model (<80ms/tok)
-run-embeddinggemma-2.sh    8086  4,096     EmbeddingGemma-2 Q8_0 + Vision    Multimodal Vector Embeddings
+run-embeddinggemma-2.sh    8086  8,192     EmbeddingGemma-2 Q8_0 + Vision    Multimodal Vector Embeddings
 
 ====================================================================================================
 USAGE EXAMPLES:

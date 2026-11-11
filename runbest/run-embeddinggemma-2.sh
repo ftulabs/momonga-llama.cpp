@@ -8,18 +8,18 @@
 # Model: embeddinggemma-2-Q8_0.gguf (310 MB)
 # MMProj: mmproj-F16.gguf (843 MB Vision Projector)
 # Default Port: 8086
-# Default Context: 4096
+# Default Context: 8192
 #
 # Key Features & Optimizations:
 #   - High-throughput dedicated embedding mode (--embedding)
 #   - Multimodal support: embeds text queries and image inputs into unified vector space
 #   - Full GPU offloading (-ngl 99)
-#   - Decoupled physical microbatch (-ub 2048 -b 2048) for wide GEMM prefill
+#   - Wide physical microbatch (-ub 4096 -b 4096) avoiding 1120 vision token clipping
 #   - OpenAI-compatible /v1/embeddings endpoint
 #
 # Usage:
 #   ./run-embeddinggemma-2.sh              # Run on default port 8086
-#   ./run-embeddinggemma-2.sh 8192         # Override context size
+#   ./run-embeddinggemma-2.sh 16384        # Override context size
 #   PORT=8096 ./run-embeddinggemma-2.sh   # Override port
 #   WARMUP=0 ./run-embeddinggemma-2.sh    # Skip warmup request
 #
@@ -35,14 +35,14 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
-CTX=${1:-4096}
+CTX=${1:-8192}
 [ $# -gt 0 ] && shift
 
 PORT=${PORT:-8086}
 HOST=${HOST:-"0.0.0.0"}
 WARMUP=${WARMUP:-1}
-UB=${UB:-2048}
-B=${B:-2048}
+UB=${UB:-4096}
+B=${B:-4096}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
