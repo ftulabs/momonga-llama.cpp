@@ -1,0 +1,19 @@
+[Unit]
+Description=llama.cpp EmbeddingGemma-2 Multimodal Embedding Service (Jetson Xavier)
+After=network-online.target mnt-sdcard.mount mnt-ssd.mount
+Wants=network-online.target
+RequiresMountsFor=/mnt/sdcard /mnt/ssd
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=triph
+EnvironmentFile=/mnt/sdcard/opt/llama/llama-embedding.env
+ExecStart=/mnt/sdcard/opt/llama/llama-embedding-start.sh
+ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do curl -s http://127.0.0.1:8086/health | grep -q ok && break || sleep 1; done; curl -s http://127.0.0.1:8086/v1/embeddings -H "Content-Type: application/json" -d "{\"input\":\"warmup\"}" >/dev/null 2>&1 || true'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

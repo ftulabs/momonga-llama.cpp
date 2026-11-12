@@ -35,6 +35,18 @@ Q4_K_M file, each measured A/B/B/A: 22.25 -> 27.86 tok/s (+25.2%) for +1.67% per
 
 ---
 
+## Dedicated Systemd Background Services (Completed 2026-11-12)
+
+- **Target:** Host `embeddinggemma-2` and `zerank-2` simultaneously as dedicated, resilient background `systemd` services on Jetson AGX Xavier.
+- **Status:** **Completed, Enabled & Verified Live**.
+- **Services Deployed:**
+  - `llama-embedding.service`: EmbeddingGemma-2 Q8_0 + Vision mmproj on port `8086` (`/v1/embeddings`), 1.0 GB RSS memory, ~31 ms query latency.
+  - `llama-rerank.service`: zerank-2 Q8_0 Causal Generative Reranker on port `8012` (`/rerank`), 2.9 GB RSS memory, 177 ms/doc latency.
+  - Co-residency verified: Both running simultaneously with under 4 GB combined RSS (~7.3 GB VRAM), leaving 22+ GB free RAM headroom.
+  - Files: Unit definitions in `/etc/systemd/system/`, scripts and env configs in `/mnt/sdcard/opt/llama/` and tracked in `momonga-llama.cpp/systemd/`.
+
+---
+
 ## Unified `runbest/` Production Suite (Completed 2026-11-10)
 
 - **Target:** Create a turnkey, unified `runbest/` directory containing self-contained, hardware-tuned launch scripts for every verified model and workload profile on the Jetson AGX Xavier.

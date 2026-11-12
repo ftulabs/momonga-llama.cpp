@@ -45,6 +45,12 @@ dropped, `-ub` becomes a free prefill parameter. Two configurations, both curren
   `run-qwen36-35b-a3b.sh` (base MoE, 8081), `run-qwen38-27b.sh` (dense coder 27B, 8083), `run-deepseek-v4-9b.sh` (Q8_0 reasoning, 8084),
   `run-spark-4b.sh` (fast edge 4B, 8085), `run-embeddinggemma-2.sh` (multimodal embedding, 8086), plus `list-models.sh` and `README.md`.
 
+- **Dedicated systemd background services are active as of 2026-11-12:**
+  `llama-embedding.service` (port 8086, EmbeddingGemma-2) and `llama-rerank.service` (port 8012, zerank-2)
+  host both models simultaneously as managed, auto-restarting background daemons. Co-residency consumes only
+  ~3.9 GB RSS (~7.3 GB unified memory) combined, verified live with sub-35ms embeddings and 177ms/doc reranking.
+  Definitions in `/etc/systemd/system/`, configs in `/mnt/sdcard/opt/llama/`, mirrored in `systemd/`.
+
 Prefill and TTFT no longer separate the three quant files at all (215-221 tok/s, 52-53 s), and
 **`-ub 2048` is the widest width that measures reproducibly** - 3072 and 4096 scatter by 32-72%
 over identical loads. Anything measured at 3072 for prefill before 2026-11-05 is superseded.
