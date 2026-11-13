@@ -10,6 +10,7 @@ Each script embeds verified hardware flags discovered and validated through empi
 
 | Script | Default Port | Model Arch | Quant / File | Task Profile | Headline Measured Performance |
 |---|---|---|---|---|---|
+| [`run-bge-reranker-v2-m3.sh`](run-bge-reranker-v2-m3.sh) | `8012` | XLM-RoBERTa 568M | Q8_0 (636 MB) | Encoder Reranker (Default) | **2.83s** for 12 docs / 10,688 tok (**3,776 tok/s**) |
 | [`run-zerank-2.sh`](run-zerank-2.sh) | `8012` | Qwen3 4.0B Causal | Q8_0 (4.28 GB) | Generative Reranker | **177.87 ms/doc**, 223.7 tok/s, 7.80 tok/J |
 | [`run-cybertiel-35b-coder-mtp.sh`](run-cybertiel-35b-coder-mtp.sh) | `8080` | MoE 35B A3B + Vision | IQ4_XS hybrid (18.1 GB) | Speculative MTP Coder | **43.97 tok/s** decode (48 tok/s tg_3s), 2,070 tok/s prefill |
 | [`run-cybertiel-35b-120k.sh`](run-cybertiel-35b-120k.sh) | `8800` | MoE 35B A3B + LoRA + Vision | Q4_K_M (20.5 GB) | 120k Context Production Chat | **27.86 - 28.7 tok/s** flat decode, 215+ tok/s prefill |

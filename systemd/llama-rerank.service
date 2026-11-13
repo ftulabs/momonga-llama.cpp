@@ -1,5 +1,5 @@
 [Unit]
-Description=llama.cpp zerank-2 Generative Causal Reranker Service (Jetson Xavier)
+Description=llama.cpp bge-reranker-v2-m3 Encoder Reranker Service (Jetson Xavier)
 After=network-online.target mnt-sdcard.mount mnt-ssd.mount
 Wants=network-online.target
 RequiresMountsFor=/mnt/sdcard /mnt/ssd

@@ -39,9 +39,9 @@ dropped, `-ub` becomes a free prefill parameter. Two configurations, both curren
   Run line: `bench/run-rerank.sh` or `runbest/run-zerank-2.sh`.
   Full engineering report: `findings/zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md`.
 
-- **A unified production suite exists in `runbest/` as of 2026-11-10:**
+- **A unified production suite exists in `runbest/` as of 2026-11-10 (updated 2026-11-13):**
   Turnkey, self-contained, verified launch scripts for each model and task profile on the Jetson Xavier:
-  `run-zerank-2.sh` (reranker, 8012), `run-cybertiel-35b-coder-mtp.sh` (MTP 6 coder, 8080), `run-cybertiel-35b-120k.sh` (120k chat, 8800),
+  `run-bge-reranker-v2-m3.sh` (default encoder reranker, 8012, 2.83s for 12-doc / 10.7k tok = 3,776 tok/s), `run-zerank-2.sh` (causal reranker, 8012), `run-cybertiel-35b-coder-mtp.sh` (MTP 6 coder, 8080), `run-cybertiel-35b-120k.sh` (120k chat, 8800),
   `run-qwen36-35b-a3b.sh` (base MoE, 8081), `run-qwen38-27b.sh` (dense coder 27B, 8083), `run-deepseek-v4-9b.sh` (Q8_0 reasoning, 8084),
   `run-spark-4b.sh` (fast edge 4B, 8085), `run-embeddinggemma-2.sh` (multimodal embedding, 8086), plus `list-models.sh` and `README.md`.
 

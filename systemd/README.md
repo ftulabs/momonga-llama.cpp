@@ -1,6 +1,6 @@
 # Dedicated llama.cpp Systemd Services (Jetson AGX Xavier)
 
-This directory contains the production `systemd` service definitions, environment configurations, and startup wrappers for hosting **`embeddinggemma-2`** and **`zerank-2`** as dedicated, co-resident background services on the NVIDIA Jetson AGX Xavier.
+This directory contains the production `systemd` service definitions, environment configurations, and startup wrappers for hosting **`embeddinggemma-2`** and **`bge-reranker-v2-m3`** as dedicated, co-resident background services on the NVIDIA Jetson AGX Xavier.
 
 ---
 
@@ -8,10 +8,10 @@ This directory contains the production `systemd` service definitions, environmen
 
 | Service Name | Default Port | Model / Architecture | Primary Endpoint | Memory Footprint |
 |---|---|---|---|---|
-| `llama-embedding.service` | `8086` | EmbeddingGemma-2 Q8_0 + Vision mmproj | `POST /v1/embeddings` | ~1.0 GB RSS (~1.8 GB VRAM) |
-| `llama-rerank.service` | `8012` | zerank-2 Q8_0 Causal Generative Reranker | `POST /rerank` | ~2.9 GB RSS (~5.5 GB VRAM) |
+| `llama-embedding.service` | `8086` | EmbeddingGemma-2 Q8_0 + Vision mmproj | `POST /v1/embeddings` | ~1.2 GB RSS |
+| `llama-rerank.service` | `8012` | bge-reranker-v2-m3 Q8_0 Encoder Reranker | `POST /v1/rerank` | ~364 MB RSS |
 
-Both services run simultaneously on the Jetson AGX Xavier, consuming **under 7.5 GB of unified memory combined** and leaving **22+ GB of free RAM headroom**.
+Both services run simultaneously on the Jetson AGX Xavier, consuming **~1.6 GB of unified memory combined**.
 
 ---
 
@@ -66,9 +66,10 @@ curl -s -X POST http://127.0.0.1:8086/v1/embeddings \
 ```bash
 curl -s http://127.0.0.1:8012/health
 
-curl -s -X POST http://127.0.0.1:8012/rerank \
+curl -s -X POST http://127.0.0.1:8012/v1/rerank \
   -H "Content-Type: application/json" \
   -d '{
+    "model": "bge-reranker-v2-m3",
     "query": "What is the capital of France?",
     "documents": [
       "Paris is the capital of France.",

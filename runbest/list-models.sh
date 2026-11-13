@@ -10,6 +10,7 @@ cat << 'EOF'
 
 Script                     Port  Context   Arch & Model                      Task / Key Feature
 ----------------------------------------------------------------------------------------------------
+run-bge-reranker-v2-m3.sh  8012  8,192     XLM-RoBERTa 568M Q8_0             Encoder Reranker (2.83s / 10.7k tok, 3,776 tok/s)
 run-zerank-2.sh            8012  8,192     Qwen3 4B Q8_0                     Causal Reranker (177ms/doc, 7.8 tok/J)
 run-cybertiel-35b-coder-mtp.sh 8080 32,768 Cyber-Tiel-Coder-35B MoE + Vision Speculative MTP 6 (48 tok/s, 2070 tok/s prefill)
 run-cybertiel-35b-120k.sh  8800  120,000   Cyber-Tiel-35B Q4KM + LoRA + Vis  120k Long Context Chat (28 tok/s flat)
@@ -22,7 +23,8 @@ run-embeddinggemma-2.sh    8086  8,192     EmbeddingGemma-2 Q8_0 + Vision    Mul
 ====================================================================================================
 USAGE EXAMPLES:
   cd runbest
-  ./run-zerank-2.sh              # Start reranker on port 8012
+  ./run-bge-reranker-v2-m3.sh    # Start fast encoder reranker on port 8012
+  ./run-zerank-2.sh              # Start causal reranker on port 8012
   ./run-cybertiel-35b-coder-mtp.sh # Start speculative MTP coding assistant on port 8080
   ./run-cybertiel-35b-120k.sh    # Start 120,000 token context production server on port 8800
   ./run-embeddinggemma-2.sh      # Start multimodal embedding server on port 8086

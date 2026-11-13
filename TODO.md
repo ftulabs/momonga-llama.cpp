@@ -35,14 +35,14 @@ Q4_K_M file, each measured A/B/B/A: 22.25 -> 27.86 tok/s (+25.2%) for +1.67% per
 
 ---
 
-## Dedicated Systemd Background Services (Completed 2026-11-12)
+## Dedicated Systemd Background Services (Updated 2026-11-13)
 
-- **Target:** Host `embeddinggemma-2` and `zerank-2` simultaneously as dedicated, resilient background `systemd` services on Jetson AGX Xavier.
+- **Target:** Host `embeddinggemma-2` and `bge-reranker-v2-m3` simultaneously as dedicated, resilient background `systemd` services on Jetson AGX Xavier.
 - **Status:** **Completed, Enabled & Verified Live**.
 - **Services Deployed:**
-  - `llama-embedding.service`: EmbeddingGemma-2 Q8_0 + Vision mmproj on port `8086` (`/v1/embeddings`), 1.0 GB RSS memory, ~31 ms query latency.
-  - `llama-rerank.service`: zerank-2 Q8_0 Causal Generative Reranker on port `8012` (`/rerank`), 2.9 GB RSS memory, 177 ms/doc latency.
-  - Co-residency verified: Both running simultaneously with under 4 GB combined RSS (~7.3 GB VRAM), leaving 22+ GB free RAM headroom.
+  - `llama-embedding.service`: EmbeddingGemma-2 Q8_0 + Vision mmproj on port `8086` (`/v1/embeddings`), ~1.2 GB RSS memory, ~31 ms query latency.
+  - `llama-rerank.service`: bge-reranker-v2-m3 Q8_0 Encoder Reranker on port `8012` (`/v1/rerank` and `/rerank`), ~364 MB RSS memory, **2.83s** for 12-doc / 10,688-token rerank (**3,776 tok/s**, vs 17.0s / 582 tok/s on `zerank-2` 4B). Switched 2026-11-13 with `-c 8192 -np 1 -b 8192 -ub 8192` so encoder `n_ubatch >= n_tokens` holds up to the full 8,192-token context.
+  - Co-residency verified: Both running simultaneously with ~1.6 GB combined RSS.
   - Files: Unit definitions in `/etc/systemd/system/`, scripts and env configs in `/mnt/sdcard/opt/llama/` and tracked in `momonga-llama.cpp/systemd/`.
 
 ---

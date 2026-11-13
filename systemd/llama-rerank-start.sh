@@ -19,7 +19,7 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-MODEL="${MODEL_PATH:-/mnt/cache/huggingface/hub/models--mradermacher--zerank-2-GGUF/snapshots/6886178557c58b375fcb79c8751673b97baeb633/zerank-2.Q8_0.gguf}"
+MODEL="${MODEL_PATH:-/mnt/cache/huggingface/hub/models--gpustack--bge-reranker-v2-m3-GGUF/snapshots/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q8_0.gguf}"
 if [ ! -f "$MODEL" ]; then
   MODEL=/mnt/cache/huggingface/hub/models--mradermacher--zerank-2-GGUF/blobs/7b9ba05a0509151c911582a4d62b14003f6a4fafa0e7ccdf572c7598cde1c100
 fi
@@ -37,13 +37,13 @@ unset GGML_CUDA_DISABLE_GRAPHS || true
 
 exec "$BIN" \
   -m "$MODEL" \
-  --alias "${MODEL_ALIAS:-zerank-2}" \
+  --alias "${MODEL_ALIAS:-bge-reranker-v2-m3}" \
   --host "${HOST:-0.0.0.0}" \
   --port "${PORT:-8012}" \
   -c "${CTX_SIZE:-8192}" \
-  -np "${PARALLEL:-4}" \
-  -b "${BATCH:-2048}" \
-  -ub "${UBATCH:-1024}" \
+  -np "${PARALLEL:-1}" \
+  -b "${BATCH:-8192}" \
+  -ub "${UBATCH:-8192}" \
   -fa "${FLASH_ATTN:-on}" \
   -ngl "${N_GPU_LAYERS:-99}" \
   ${EXTRA_ARGS:---reranking}
