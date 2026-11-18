@@ -198,10 +198,52 @@ static __global__ void dequantize_block_q5_K(const void * __restrict__ vx, dst_t
 }
 
 template<typename dst_t>
-static __global__ void dequantize_block_q6_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
-    const int64_t i = blockIdx.x;
+static __global__ void dequantize_block_q6_K(const void * __restrict__ vx, dst_t * __restrict__ yy, const int64_t nb) {
+    if constexpr (std::is_same_v<dst_t, half>) {
+        const int64_t i = (int64_t)blockIdx.x * blockDim.y + threadIdx.y;
+        if (i >= nb) {
+            return;
+        }
+        const block_q6_K * x = (const block_q6_K *) vx;
+        const int tid = threadIdx.x;
+        const int ip  = tid / 16;
+        const int ir  = tid % 16;
+        const int il  = 2 * ir;
+        const int is  = 8 * ip + (ir >> 3);
 
-    dequantize_q6_K(vx, i, yy + i*QK_K, threadIdx.x);
+        half * y = yy + i * QK_K + 128 * ip + il;
+
+        const float d = __half2float(x[i].d);
+        const int8_t * sc = x[i].scales + is;
+        const float d0 = d * sc[0];
+        const float d2 = d * sc[2];
+        const float d4 = d * sc[4];
+        const float d6 = d * sc[6];
+
+        const uint16_t ql0  = *(const uint16_t *)(x[i].ql + 64 * ip + il);
+        const uint16_t ql32 = *(const uint16_t *)(x[i].ql + 64 * ip + il + 32);
+        const uint16_t qh   = *(const uint16_t *)(x[i].qh + 32 * ip + il);
+
+        const uint32_t qh0 = qh & 0xFFu;
+        const uint32_t qh1 = qh >> 8;
+
+        *(half2 *)(y +  0) = make_half2(
+            d0 * ((int)(( ql0       & 0xF) | (((qh0 >> 0) & 3) << 4)) - 32),
+            d0 * ((int)(((ql0 >> 8) & 0xF) | (((qh1 >> 0) & 3) << 4)) - 32));
+        *(half2 *)(y + 32) = make_half2(
+            d2 * ((int)(( ql32       & 0xF) | (((qh0 >> 2) & 3) << 4)) - 32),
+            d2 * ((int)(((ql32 >> 8) & 0xF) | (((qh1 >> 2) & 3) << 4)) - 32));
+        *(half2 *)(y + 64) = make_half2(
+            d4 * ((int)(((ql0 >>  4) & 0xF) | (((qh0 >> 4) & 3) << 4)) - 32),
+            d4 * ((int)(((ql0 >> 12) & 0xF) | (((qh1 >> 4) & 3) << 4)) - 32));
+        *(half2 *)(y + 96) = make_half2(
+            d6 * ((int)(((ql32 >>  4) & 0xF) | (((qh0 >> 6) & 3) << 4)) - 32),
+            d6 * ((int)(((ql32 >> 12) & 0xF) | (((qh1 >> 6) & 3) << 4)) - 32));
+    } else {
+        const int64_t i = blockIdx.x;
+        (void) nb;
+        dequantize_q6_K(vx, i, yy + i*QK_K, threadIdx.x);
+    }
 }
 
 template<typename dst_t>
@@ -348,8 +390,14 @@ static void dequantize_row_q5_K_cuda(const void * vx, dst_t * y, const int64_t k
 
 template<typename dst_t>
 static void dequantize_row_q6_K_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
-    const int nb = k / QK_K;
-    dequantize_block_q6_K<<<nb, 64, 0, stream>>>(vx, y);
+    const int64_t nb = k / QK_K;
+    if constexpr (std::is_same_v<dst_t, half>) {
+        const dim3 block_dims(32, 4, 1);
+        const int64_t nblocks = (nb + 3) / 4;
+        dequantize_block_q6_K<<<nblocks, block_dims, 0, stream>>>(vx, y, nb);
+    } else {
+        dequantize_block_q6_K<<<nb, 64, 0, stream>>>(vx, y, nb);
+    }
 }
 
 template<typename dst_t>

@@ -15,6 +15,13 @@ void ggml_cuda_op_rms_norm_fused_add(ggml_backend_cuda_context & ctx,
                                      ggml_tensor *               mul_tensor,
                                      ggml_tensor *               add_tensor);
 
+bool ggml_cuda_op_rms_norm_mul_opt(ggml_backend_cuda_context & ctx,
+                                   ggml_tensor *               pre_add,
+                                   ggml_tensor *               rms_norm,
+                                   ggml_tensor *               mul_tensor,
+                                   half *                      direct_f16,
+                                   void *                      direct_q8_1);
+
 void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 
 void ggml_cuda_op_l2_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst);

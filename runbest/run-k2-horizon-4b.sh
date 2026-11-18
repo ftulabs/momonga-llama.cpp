@@ -10,13 +10,14 @@
 # Default Context: 32768 (-ctk f16 -ctv f16; ~7.5 GiB total footprint)
 #
 # Key Features & Optimizations:
-#   - Grouped RMSNorm + weight multiply fusion in src/models/k2-horizon.cpp
-#   - Vectorized 4-warp dequantize_block_q4_K<half> + f16 src1 cache + f32x4 GLU + compact RoPE
+#   - Grouped RMSNorm + weight multiply fusion in src/models/k2-horizon.cpp + RMS_NORM+MUL+ADD fusion
+#   - Vectorized 4-warp dequantize_block_q4_K<half> + direct src1 cache + f32x4 GLU + compact RoPE
+#   - Volta sm_72 deep-K cublasGemmEx ALGO4/5/6 + PR #29796 redundant sync skip + PR #30792 coalesced q8_0 KV tile loader
 #   - Volta sm_72 dense Q4_K MMVQ (unfused, nwarps=1 rpb=4 -> 97.7 GB/s), Q6_K small_k (64 regs), q8_1 cache
-#   - Decode: 30.06 tok/s standalone (+32.4% vs 22.71 baseline), 29.06 tok/s server median
-#   - Prefill: 729.4 tok/s at pp2048 (-ub 2048 -b 2048), 688.9 tok/s at pp512 (-ub 1024)
+#   - Decode: 30.61 tok/s standalone (+34.8% vs 22.71 baseline), 29.60 tok/s server median (-t 2 -tb 2 -bs)
+#   - Prefill: 771.66 tok/s at pp2048 (-ub 2048 -b 2048, +44.8%), 729.59 tok/s at pp512 (-ub 1024, +35.8%)
 #   - Native f16 KV cache (-ctk f16 -ctv f16): strictly faster than q8_0 at all depths
-#     (up to +61.2% decode at d=16384: 17.31 vs 10.74 tok/s)
+#     (17.55 vs 14.06 tok/s at d=16384; q8_0 KV boosted +30.9% from 10.74 via coalesced fattn-tile)
 #   - Host flag -bs (--backend-sampling) offloads 250k-vocab sampling to GPU
 #
 # Usage:
@@ -46,6 +47,8 @@ WARMUP=${WARMUP:-1}
 UB=${UB:-2048}
 B=${B:-2048}
 PAR=${PAR:-1}
+THREADS=${THREADS:-2}
+TB=${TB:-2}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -81,6 +84,7 @@ echo "================================================================="
 env -u GGML_CUDA_DISABLE_GRAPHS "$BIN" \
   -m "$MODEL" \
   -c "$CTX" -fa on -ngl 99 \
+  -t "$THREADS" -tb "$TB" \
   -ctk f16 -ctv f16 \
   -ub "$UB" -b "$B" \
   --parallel "$PAR" --poll 0 \

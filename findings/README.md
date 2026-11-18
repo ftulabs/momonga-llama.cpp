@@ -36,9 +36,9 @@ Complete engineering record for the **ZeroEntropy `zerank-2-reranker`** (4.0B de
 ### 3. [`k2-horizon/`](k2-horizon/) (Dense 4B/5B Volta Optimization Complete)
 Engineering record for **K2-Horizon 4B Q4_K_M** (36-layer dense transformer, 5.06B params, grouped RMSNorm, 250k vocab):
 - **Milestone Reached:**
-  - **30.06 +/- 0.18 tok/s decode** (+32.4% vs 22.71 baseline; `ffn_gate/up` at 97.7 GB/s, `Q6_K` `lm_head` cut `5.93 -> 5.55 ms` via `64`-reg `16` blocks/SM, `src1` `q8_1` cache cuts `quantize_q8_1` calls `181 -> 73`).
-  - **729.41 +/- 2.71 tok/s prefill (`pp2048`)** (+36.8% vs 533.06 baseline; `688.92 +/- 5.40` `pp512` `-ub 1024`) via 4-warp vectorized `dequantize_block_q4_K<half>`, `src1` `f16` cache, `float4` contiguous GLU, and right-sized `rope.cu` `block_y`.
-  - Native `f16` KV cache strictly beats `q8_0` KV across all depths `0..16384` (up to **+61.2% decode at 16k**: `17.31` vs `10.74 tok/s`).
+  - **30.61 +/- 0.19 tok/s decode** (+34.8% vs 22.71 baseline; `29.60 tok/s` server `-t 2 -tb 2 -bs` median; `ffn_gate/up` at 97.7-98.9 GB/s, `Q6_K` `lm_head` cut `5.93 -> 5.55 ms` via `64`-reg `16` blocks/SM, `RMS_NORM+MUL+ADD` fusion, direct `src1` `q8_1` cache, PR `#29796` sync skip).
+  - **771.66 +/- 4.19 tok/s prefill (`pp2048`)** (+44.8% vs 533.06 baseline; `729.59 +/- 8.24` `pp512` `-ub 1024`; `672.2 tok/s` server prefill) via 4-warp vectorized `dequantize_block_q4_K<half>`, Volta deep-K `cublasGemmEx ALGO4/5/6`, `src1` `f16` cache, `float4` contiguous GLU, and right-sized `rope.cu` `block_y`.
+  - Native `f16` KV cache beats `q8_0` KV across all depths `0..16384` (**`17.55`** vs coalesced **`14.06 tok/s`** at 16k via PR `#30792`; exact `PPL = 2.5997 +/- 0.04012`).
   - **Report:** [k2-horizon/2026-11-18-k2-horizon-4b-optimization.md](k2-horizon/2026-11-18-k2-horizon-4b-optimization.md).
 
 ### 4. Future Architectural Campaigns

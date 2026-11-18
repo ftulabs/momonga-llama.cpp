@@ -40,10 +40,12 @@ Q4_K_M file, each measured A/B/B/A: 22.25 -> 27.86 tok/s (+25.2%) for +1.67% per
 - **Target:** `/mnt/ssd/models/K2-Horizon-4B-Q4_K_M.gguf` (36-layer dense `k2-horizon`, 5.06B params, grouped RMSNorm, 250k vocab).
 - **Status:** **Completed & Verified in `runbest/run-k2-horizon-4b.sh` (port 8087).**
 - **Results (`llama-bench` zero-env, `-ngl 99 -fa 1 -b 2048 -ctk f16 -ctv f16`):**
-  - **Decode (`tg128`):** `22.71` -> **`30.06 +/- 0.18 tok/s`** (**+32.4%**, 84.0 GB/s whole-model throughput; `ffn_gate/up` at `97.7 GB/s` in `ncu`; `Q6_K` `lm_head` `5.93 -> 5.55 ms`; server `-bs` median `29.06 tok/s`).
-  - **Prefill:** `pp512` `537.24` -> **`688.92 +/- 5.40 tok/s`** (`-ub 1024`, +28.2%); `pp2048` `533.06` (`612.48` at `-ub 1024`) -> **`729.41 +/- 2.71 tok/s`** (`-ub 2048`, **+36.8%**).
-  - **Long-context decode (`-d 16384`):** `f16` KV sustains `17.31 +/- 0.08 tok/s` vs `q8_0` KV `10.74 +/- 0.01 tok/s` (**+61.2%**).
-  - **Key Changes:** Grouped RMSNorm fusion (`src/models/k2-horizon.cpp`), 4-warp vectorized `dequantize_block_q4_K<half>` (`convert.cu`), Volta dense `Q4_K`/`Q6_K` MMVQ unfusion + PR `#32004` + intra-graph `src1` `q8_1`/`f16` cache (`ggml-cuda.cu`), Volta dense `Q4_K` `nwarps=1, rpb=4` + `Q6_K` `small_k` with `16` blocks/SM (`mmvq.cu`), `float4` contiguous GLU (`unary.cu`), and compact `rope.cu` `block_y`.
+  - **Decode (`tg128`):** `22.71` -> **`30.61 +/- 0.19 tok/s`** (**+34.8%**, 85.6 GB/s whole-model throughput; `ffn_gate/up` at `97.7-98.9 GB/s` in `ncu`; `Q6_K` `lm_head` `5.93 -> 5.55 ms`; server `-t 2 -tb 2 -bs` median `29.60 tok/s`).
+  - **Prefill:** `pp512` `537.24` -> **`729.59 +/- 8.24 tok/s`** (`-ub 1024`, +35.8%); `pp2048` `533.06` (`612.48` at `-ub 1024`) -> **`771.66 +/- 4.19 tok/s`** (`-ub 2048`, **+44.8%**; server prefill `672.2 tok/s` at 2,213 tok).
+  - **Long-context decode (`-d 16384`):** `f16` KV sustains **`17.55 +/- 0.04 tok/s`** vs coalesced `q8_0` KV **`14.06 +/- 0.05 tok/s`** (up +30.9% from `10.74 +/- 0.01`).
+  - **Perplexity & Regression:** `PPL = 2.5997 +/- 0.04012` (`f16` KV) / `2.5998 +/- 0.04013` (`q8_0` KV); `Cyber-Tiel-Coder-35B-A3B` `23.48 tok/s` (`EXTRA=""`) / `28.06 tok/s` (`run-best.sh` flags), zero regression.
+  - **Key Changes:** Grouped RMSNorm + multiply fusion (`src/models/k2-horizon.cpp`) + `RMS_NORM+MUL+ADD` (`norm.cu`/`ggml-cuda.cu`), 4-warp `dequantize_block_q4_K<half>` (`convert.cu`), Volta deep-K `cublasGemmEx ALGO4/5/6`, dense `Q4_K`/`Q6_K` MMVQ unfusion + PR `#32004` + direct `src1` cache + PR `#29796` redundant sync skip + PR `#30792` coalesced `q8_0` KV tile loader (`fattn-tile.cuh`), Volta dense `Q4_K` `nwarps=1, rpb=4` + `Q6_K` `small_k` with `16` blocks/SM (`mmvq.cu`), `float4` contiguous GLU (`unary.cu`), compact `rope.cu` `block_y`, and `-t 2 -tb 2` server threading.
+  - **Closed (do not re-test on K2-Horizon):** `fattn-mma-f16.cuh` Volta `DKQ=128` alt configs, `GGML_CUDA_GRAPH_CHUNK_SIZE=0`, `GGML_CUDA_SMALLK` overrides, `ngram-simple` spec decode, post-hoc `all-Q4_K` requant (`+2.11%` PPL).
   - **Report:** `findings/k2-horizon/2026-11-18-k2-horizon-4b-optimization.md`.
 
 ---

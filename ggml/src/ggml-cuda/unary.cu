@@ -341,6 +341,72 @@ static __global__ void unary_gated_op_kernel_f32x4(
         op(xv.w) * gv.w);
 }
 
+template <float (*op)(float)>
+static __global__ void unary_gated_op_kernel_f32x4_to_f16(
+        const float4 * __restrict__ x,
+        const float4 * __restrict__ g,
+        uint2 * __restrict__ dst_f16_u2,
+        const int64_t k4) {
+    ggml_cuda_pdl_lc();
+    const int64_t i = int64_t(blockDim.x)*blockIdx.x + threadIdx.x;
+    if (i >= k4) {
+        return;
+    }
+    ggml_cuda_pdl_sync();
+    const float4 xv = x[i];
+    const float4 gv = g[i];
+    union {
+        half2 h[2];
+        uint2 u;
+    } out;
+    out.h[0] = make_half2(op(xv.x) * gv.x, op(xv.y) * gv.y);
+    out.h[1] = make_half2(op(xv.z) * gv.z, op(xv.w) * gv.w);
+    dst_f16_u2[i] = out.u;
+}
+
+template <float (*op)(float)>
+static __global__ void unary_gated_op_kernel_f32x4_to_q8_1(
+        const float4 * __restrict__ x,
+        const float4 * __restrict__ g,
+        block_q8_1 * __restrict__ y,
+        const int64_t k4) {
+    ggml_cuda_pdl_lc();
+    const int64_t i = int64_t(blockDim.x)*blockIdx.x + threadIdx.x;
+    if (i >= k4) {
+        return;
+    }
+    ggml_cuda_pdl_sync();
+    const float4 xv = x[i];
+    const float4 gv = g[i];
+    const float v0 = op(xv.x) * gv.x;
+    const float v1 = op(xv.y) * gv.y;
+    const float v2 = op(xv.z) * gv.z;
+    const float v3 = op(xv.w) * gv.w;
+
+    float amax = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3)));
+#pragma unroll
+    for (int mask = 4; mask >= 1; mask >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, mask, WARP_SIZE));
+    }
+    const float d = amax / 127.0f;
+    const int8_t q0 = amax == 0.0f ? 0 : (int8_t) roundf(v0 / d);
+    const int8_t q1 = amax == 0.0f ? 0 : (int8_t) roundf(v1 / d);
+    const int8_t q2 = amax == 0.0f ? 0 : (int8_t) roundf(v2 / d);
+    const int8_t q3 = amax == 0.0f ? 0 : (int8_t) roundf(v3 / d);
+    int qsum = (int) q0 + (int) q1 + (int) q2 + (int) q3;
+#pragma unroll
+    for (int mask = 4; mask >= 1; mask >>= 1) {
+        qsum += __shfl_xor_sync(0xffffffff, qsum, mask, WARP_SIZE);
+    }
+    const int64_t ib = i >> 3;
+    const int iq = (int) (i & 7);
+    const int packed = ((uint8_t) q0) | (((uint8_t) q1) << 8) | (((uint8_t) q2) << 16) | (((uint8_t) q3) << 24);
+    ((int *) y[ib].qs)[iq] = packed;
+    if (iq == 0) {
+        y[ib].ds = make_half2(d, d * qsum);
+    }
+}
+
 template <float (*op)(float), typename T>
 static void unary_gated_cuda(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1, cudaStream_t stream) {
     if constexpr (std::is_same_v<T, float>) {
@@ -432,6 +498,52 @@ void ggml_cuda_op_geglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
 void ggml_cuda_op_swiglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_op_unary_gated<op_silu>(ctx, dst);
+}
+
+bool ggml_cuda_op_swiglu_direct(ggml_backend_cuda_context & ctx, const ggml_tensor * dst, half * dst_f16, void * dst_q8_1) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    if (!src1 || src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+    const int64_t nc = src0->ne[0];
+    const int64_t k  = ggml_nelements(dst);
+    const int64_t o0 = src0->nb[1] / sizeof(float);
+    const int64_t o1 = src1->nb[1] / sizeof(float);
+    if (o0 != nc || o1 != nc || (k % 4 != 0) || (nc % 4 != 0)) {
+        return false;
+    }
+    const float * src0_p = (const float *) src0->data;
+    const float * src1_p = (const float *) src1->data;
+    if (((uintptr_t) src0_p & 15) != 0 || ((uintptr_t) src1_p & 15) != 0) {
+        return false;
+    }
+
+    const int64_t k4 = k / 4;
+    const int64_t num_blocks = (k4 + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
+    cudaStream_t stream = ctx.stream();
+    const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params((dim3) num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream);
+
+    if (dst_f16 != nullptr) {
+        if (((uintptr_t) dst_f16 & 15) != 0) {
+            return false;
+        }
+        ggml_cuda_kernel_launch(unary_gated_op_kernel_f32x4_to_f16<op_silu>, launch_params,
+            (const float4 *) src0_p, (const float4 *) src1_p, (uint2 *) dst_f16, k4);
+        return true;
+    }
+    if (dst_q8_1 != nullptr) {
+        if (nc % MATRIX_ROW_PADDING != 0 || nc % QK8_1 != 0) {
+            return false;
+        }
+        ggml_cuda_kernel_launch(unary_gated_op_kernel_f32x4_to_q8_1<op_silu>, launch_params,
+            (const float4 *) src0_p, (const float4 *) src1_p, (block_q8_1 *) dst_q8_1, k4);
+        return true;
+    }
+    return false;
 }
 
 void ggml_cuda_op_geglu_erf(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
