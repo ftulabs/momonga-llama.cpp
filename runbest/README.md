@@ -19,6 +19,7 @@ Each script embeds verified hardware flags discovered and validated through empi
 | [`run-deepseek-v4-9b.sh`](run-deepseek-v4-9b.sh) | `8084` | Qwen 3.5 9B Dense | Q8_0 (9.79 GB) | High-Precision Reasoning | Full Q8_0 lossless weights, 16k context |
 | [`run-spark-4b.sh`](run-spark-4b.sh) | `8085` | Spark 4.0B Dense | Q8_0 (4.38 GB) | Ultra-Fast Edge LLM | Sub-80ms decode latency, <5 GB VRAM |
 | [`run-embeddinggemma-2.sh`](run-embeddinggemma-2.sh) | `8086` | EmbeddingGemma-2 + Vision | Q8_0 (310 MB) | Multimodal Embedding | Text + image vector search (/v1/embeddings) |
+| [`run-k2-horizon-4b.sh`](run-k2-horizon-4b.sh) | `8087` | K2-Horizon Dense 5.06B | Q4_K_M (2.93 GiB) | Fast Dense LLM (`f16` KV) | **29.74 tok/s** decode, **716.3 tok/s** prefill (`pp2048`) |
 
 To list all available runners in terminal:
 ```bash
@@ -188,6 +189,25 @@ All scripts adhere to a uniform, robust convention:
   curl -s -X POST http://127.0.0.1:8086/v1/embeddings \
     -H "Content-Type: application/json" \
     -d '{"input": "Deep learning on NVIDIA Jetson Xavier"}' | jq .data[0].embedding[:5]
+  ```
+
+---
+
+### 3.9. K2-Horizon 4B Q4_K_M (`run-k2-horizon-4b.sh`)
+- **Port:** `8087`
+- **Context:** `-c 32768` with `-ctk f16 -ctv f16` (~7.5 GiB total RAM footprint).
+- **Architecture:** Dense 36-layer `k2-horizon` (5.06B params, GQA 32/8, grouped RMSNorm `n_groups=2`, 250k vocab).
+- **Hardware Enhancements:**
+  - Grouped RMSNorm + weight multiply fusion in `src/models/k2-horizon.cpp`.
+  - Vectorized 4-warp `dequantize_block_q4_K<half>` prefill kernel (`+34%` `pp2048` -> `716.3 tok/s`).
+  - Volta `sm_72` dense `Q4_K` MMVQ unfused `nwarps=1, rpb=4` (`97.7 GB/s` on `ffn_gate/up`, `29.74 tok/s` decode) and `Q6_K` `small_k` (`nwarps=2, rpb=4`).
+  - Native `f16` KV cache (strictly outperforms `q8_0` across all depths `0..16384`, up to `+61.2%` decode at 16k).
+  - GPU backend sampling (`-bs`) offloads 250k-vocab sampling.
+- **Test Request:**
+  ```bash
+  curl -s -X POST http://127.0.0.1:8087/completion \
+    -H "Content-Type: application/json" \
+    -d '{"prompt": "def quicksort(arr):", "n_predict": 64, "temperature": 0.0}' | jq -r .content
   ```
 
 ---

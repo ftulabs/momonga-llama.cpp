@@ -35,6 +35,19 @@ Q4_K_M file, each measured A/B/B/A: 22.25 -> 27.86 tok/s (+25.2%) for +1.67% per
 
 ---
 
+## K2-Horizon 4B Optimization (Completed 2026-11-18)
+
+- **Target:** `/mnt/ssd/models/K2-Horizon-4B-Q4_K_M.gguf` (36-layer dense `k2-horizon`, 5.06B params, grouped RMSNorm, 250k vocab).
+- **Status:** **Completed & Verified in `runbest/run-k2-horizon-4b.sh` (port 8087).**
+- **Results (`llama-bench` zero-env, `-ngl 99 -fa 1 -b 2048 -ctk f16 -ctv f16`):**
+  - **Decode (`tg128`):** `22.71` -> **`29.74 +/- 0.23 tok/s`** (**+31.0%**, 83.2 GB/s whole-model throughput; `ffn_gate/up` at `97.7 GB/s` in `ncu`).
+  - **Prefill:** `pp512` `537.24` -> **`680.62 +/- 8.23 tok/s`** (`-ub 1024`, +26.7%); `pp2048` `533.06` (`612.48` at `-ub 1024`) -> **`716.30 +/- 2.70 tok/s`** (`-ub 2048`, **+34.4%**).
+  - **Long-context decode (`-d 16384`):** `f16` KV sustains `17.31 +/- 0.08 tok/s` vs `q8_0` KV `10.74 +/- 0.01 tok/s` (**+61.2%**).
+  - **Key Changes:** Grouped RMSNorm fusion (`src/models/k2-horizon.cpp`), 4-warp vectorized `dequantize_block_q4_K<half>` (`ggml/src/ggml-cuda/convert.cu`), Volta dense `Q4_K`/`Q6_K` MMVQ unfusion (`ggml/src/ggml-cuda/ggml-cuda.cu`), and Volta dense `Q4_K` `nwarps=1, rpb=4` + `Q6_K` `small_k` (`ggml/src/ggml-cuda/mmvq.cu`).
+  - **Report:** `findings/k2-horizon/2026-11-18-k2-horizon-4b-optimization.md`.
+
+---
+
 ## Dedicated Systemd Background Services (Updated 2026-11-13)
 
 - **Target:** Host `embeddinggemma-2` and `bge-reranker-v2-m3` simultaneously as dedicated, resilient background `systemd` services on Jetson AGX Xavier.
@@ -457,6 +470,13 @@ weight-adjacent change still standing. See `findings/cyber-tiel-qwen35moe/2026-1
 ## Closed - Do Not Re-test
 
 Full measurements in `findings/` and `AGENTS.md`.
+
+- **K2-Horizon 4B closed paths (MMQ prefill, FlashAttention `Q_in_reg=false`, `q8_0` KV, post-hoc `all-Q4_K` requant) - closed 2026-11-18.**
+  - `GGML_CUDA_MMQ_FORCE=1` prefill reads `pp512 = 315.98 tok/s` (~2x slower than cuBLAS FP16 Tensor Core `cutlass_70_tensorop_s884gemm_f16`).
+  - `fattn-mma-f16.cuh` `Q_in_reg=false` configs regressed `pp2048` (`627.23 / 672.28` vs `716.30 tok/s`); reverted.
+  - `MMVQ_PARAMETERS_TURING` `nwarps=2, rpb=2` (`27.21`) and `nwarps=1, rpb=8` (`29.87` at 96 regs) are slower/heavier than `nwarps=1, rpb=4` (`64` regs).
+  - `-ctk q8_0 -ctv q8_0` loses to `-ctk f16 -ctv f16` at every tested depth `0..16384` (up to `10.74` vs `17.31 tok/s` at `16384`).
+  - Post-hoc `Q6_K -> Q4_K` requant (`Q4_K_S` + `^output\.weight=q4_k`, 2,727.82 MiB) increased `tg128` to `33.41 tok/s` (+12.3%) at a `+2.11%` perplexity cost (`2.5997 -> 2.6546`); rejected and temporary file deleted. See `findings/k2-horizon/2026-11-18-k2-horizon-4b-optimization.md`.
 
 - **Naive Q4_0 KV Cache without precision tailing at 262k context - closed 2026-11-08, hard negative.**
   Testing `-ctk q4_0 -ctv q4_0` at `CTX=262144` freed 3.5 GB of RAM (22.7 GB used vs 26.2 GB), but

@@ -39,11 +39,20 @@ dropped, `-ub` becomes a free prefill parameter. Two configurations, both curren
   Run line: `bench/run-rerank.sh` or `runbest/run-zerank-2.sh`.
   Full engineering report: `findings/zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md`.
 
-- **A unified production suite exists in `runbest/` as of 2026-11-10 (updated 2026-11-13):**
+- **A fourth optimized profile exists as of 2026-11-18: `K2-Horizon-4B-Q4_K_M` (`run-k2-horizon-4b.sh`).**
+  Dense 36-layer transformer (`5.06B` params, `n_embd=2560`, `n_ff=10240`, grouped RMSNorm `n_groups=2`, `250k` vocab) on `/mnt/ssd/models/K2-Horizon-4B-Q4_K_M.gguf` (2.93 GiB).
+  Fused grouped RMSNorm + multiply (`src/models/k2-horizon.cpp`), vectorized 4-warp `dequantize_block_q4_K<half>` (`ggml/src/ggml-cuda/convert.cu`),
+  unfused Volta dense `Q4_K`/`Q6_K` MMVQ (`ggml/src/ggml-cuda/ggml-cuda.cu`), and Volta dense `Q4_K` `nwarps=1, rpb=4` (`97.7 GB/s`) + `Q6_K` `small_k` (`ggml/src/ggml-cuda/mmvq.cu`)
+  deliver **29.74 tok/s** decode (+31.0% vs 22.71 baseline) and **716.30 tok/s** prefill (`pp2048`, +34.4%) with zero environment overrides.
+  Native `f16` KV (`-ctk f16 -ctv f16`) strictly outperforms `q8_0` KV across all depths `0..16384` (up to **17.31 vs 10.74 tok/s** at `d=16384`).
+  Turnkey runner: `runbest/run-k2-horizon-4b.sh` (port `8087`, `-c 32768`, `-ub 2048 -b 2048`, `-bs`).
+  Full report: `findings/k2-horizon/2026-11-18-k2-horizon-4b-optimization.md`.
+
+- **A unified production suite exists in `runbest/` as of 2026-11-10 (updated 2026-11-18):**
   Turnkey, self-contained, verified launch scripts for each model and task profile on the Jetson Xavier:
   `run-bge-reranker-v2-m3.sh` (default encoder reranker, 8012, 2.83s for 12-doc / 10.7k tok = 3,776 tok/s), `run-zerank-2.sh` (causal reranker, 8012), `run-cybertiel-35b-coder-mtp.sh` (MTP 6 coder, 8080), `run-cybertiel-35b-120k.sh` (120k chat, 8800),
   `run-qwen36-35b-a3b.sh` (base MoE, 8081), `run-qwen38-27b.sh` (dense coder 27B, 8083), `run-deepseek-v4-9b.sh` (Q8_0 reasoning, 8084),
-  `run-spark-4b.sh` (fast edge 4B, 8085), `run-embeddinggemma-2.sh` (multimodal embedding, 8086), plus `list-models.sh` and `README.md`.
+  `run-spark-4b.sh` (fast edge 4B, 8085), `run-embeddinggemma-2.sh` (multimodal embedding, 8086), `run-k2-horizon-4b.sh` (K2-Horizon 4B, 8087), plus `list-models.sh` and `README.md`.
 
 - **Dedicated systemd background services are active as of 2026-11-12:**
   `llama-embedding.service` (port 8086, EmbeddingGemma-2) and `llama-rerank.service` (port 8012, zerank-2)

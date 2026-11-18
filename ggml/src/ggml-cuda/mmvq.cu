@@ -543,6 +543,9 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     }
     if (table_id == MMVQ_PARAMETERS_TURING) {
         if (ncols_dst == 1) {
+            if (halve_iters) {
+                return 1;
+            }
             switch (type) {
                 case GGML_TYPE_Q2_K:
                 case GGML_TYPE_Q3_K:
@@ -606,10 +609,13 @@ static constexpr __host__ __device__ bool mmvq_two_rows_ncols1(ggml_type type) {
     }
 }
 
-static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
+static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1, bool halve_iters = false) {
     if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN || table_id == MMVQ_PARAMETERS_TURING || table_id == MMVQ_PARAMETERS_GB10) {
         switch (ncols_dst) {
             case 1:
+                if (table_id == MMVQ_PARAMETERS_TURING && halve_iters) {
+                    return 4;
+                }
                 if (small_k) {
                     // Same argument as ncols 5-8: y is re-read once per output row. small_k already
                     // guarantees the wider layout covers K, so doubling the rows only halves that re-read.
@@ -668,7 +674,7 @@ static __global__ void mul_mat_vec_q(
     constexpr int vdr = get_vdr_mmvq(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    constexpr int rows_per_cuda_block = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
+    constexpr int rows_per_cuda_block = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps, halve_iters);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
@@ -1074,7 +1080,7 @@ static std::pair<dim3, dim3> calc_launch_params(
         const int ncols_dst, const int nrows_x, const int nchannels_dst, const int nsamples_or_ntokens,
         const int warp_size, const mmvq_parameter_table_id table_id, const bool small_k = false, const bool halve_iters = false) {
     const int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    const int rpb = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
+    const int rpb = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps, halve_iters);
     const int64_t nblocks = (nrows_x + rpb - 1) / rpb;
     const dim3 block_nums(nblocks, nchannels_dst, nsamples_or_ntokens);
     const dim3 block_dims(warp_size, nwarps, 1);
@@ -1224,6 +1230,8 @@ static void mul_mat_vec_q_switch_ncols_dst(
                 return smallk_env != 0;
             }
         }
+        const bool is_volta = GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_VOLTA && cc < GGML_CUDA_CC_TURING;
+
         // When K is small, increase rows_per_block to match nwarps so each warp has more work to do
         // Trigger when the full thread block covers all K blocks in a single loop iteration and few threads remain idle.
         const int  nwarps = calc_nwarps(type, c_ncols_dst, table_id);
@@ -1234,6 +1242,17 @@ static void mul_mat_vec_q_switch_ncols_dst(
         const int  cover   = nwarps * blocks_per_iter_1warp;
         bool       use     = nwarps > 1 &&
                              (blocks_per_row_x < cover || blocks_per_row_x % cover == 0);
+        if (is_volta && !has_ids && c_ncols_dst == 1) {
+            if (type == GGML_TYPE_Q4_K) {
+                // Handled by should_halve_iters (nwarps=1, rpb=4) to avoid barrier and warp tail idleness.
+                return false;
+            }
+            if (type == GGML_TYPE_Q6_K) {
+                // Q6_K hides 16-bit load/ALU stalls better with nwarps=2; 4 rows/block still improves
+                // y-vector reuse whenever blocks_per_row_x is a multiple of 1-warp iteration width (e.g. K=2560).
+                use = blocks_per_row_x < cover || blocks_per_row_x % blocks_per_iter_1warp == 0;
+            }
+        }
 
         constexpr std::array<ggml_type, 2> iq_slow_turing = {
             GGML_TYPE_IQ3_XXS,
@@ -1266,8 +1285,15 @@ static void mul_mat_vec_q_switch_ncols_dst(
         return use;
     };
 
-    // Whether doubling nwarps pays off on the ncols_dst == 1 path, where K sets the K loop trip count.
+    // Whether nwarps adjustment pays off on the ncols_dst == 1 path, where K sets the K loop trip count.
     const auto should_halve_iters = [&] {
+        if (table_id == MMVQ_PARAMETERS_TURING) {
+            // On Volta (sm_72), dense Q4_K with ncols_dst=1 reaches ~98 GB/s using nwarps=1, rpb=4
+            // (eliminating barrier, shared memory reduction, and warp-1 tail idleness).
+            return !has_ids &&
+                   GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_VOLTA && cc < GGML_CUDA_CC_TURING &&
+                   type == GGML_TYPE_Q4_K;
+        }
         if (table_id != MMVQ_PARAMETERS_GB10) {
             return false;
         }
@@ -1311,7 +1337,9 @@ static void mul_mat_vec_q_switch_ncols_dst(
                     calc_nwarps(type, c_ncols_dst, MMVQ_PARAMETERS_GB10, false, true) !=
                     calc_nwarps(type, c_ncols_dst, MMVQ_PARAMETERS_GB10, false, false);
 
-                constexpr bool c_halve_iters = decltype(halve_iters_tag)::value && c_promoted;
+                constexpr bool c_halve_iters = decltype(halve_iters_tag)::value &&
+                    (c_promoted || c_small_k || calc_nwarps(type, c_ncols_dst, MMVQ_PARAMETERS_TURING, false, true) !=
+                                                calc_nwarps(type, c_ncols_dst, MMVQ_PARAMETERS_TURING, false, false));
 
                 const std::pair<dim3, dim3> dims = calc_launch_params<type>(c_ncols_dst, nrows_x, nchannels_dst + (fusion.shared_up != nullptr),
                                                                               nsamples_dst, warp_size, table_id, c_small_k, c_halve_iters);

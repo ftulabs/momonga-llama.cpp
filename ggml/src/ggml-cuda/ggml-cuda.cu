@@ -2087,6 +2087,12 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     if (cc <= GGML_CUDA_CC_PASCAL) {
         return false;
     }
+    // On Volta (sm_72), fusing gate+up or mul_mat+add on dense Q4_K/Q6_K pushes MMVQ registers
+    // from ~64 to 96-126, cutting occupancy from 46-50% to ~30% and hurting bandwidth.
+    if (GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_VOLTA && cc < GGML_CUDA_CC_TURING &&
+        tensor->op == GGML_OP_MUL_MAT && (src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q6_K)) {
+        return false;
+    }
     //we only support fusion for ncols_dst = 1
     if (tensor->op == GGML_OP_MUL_MAT && dst->ne[1] != 1) {
         return false;

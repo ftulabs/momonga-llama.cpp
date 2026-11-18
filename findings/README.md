@@ -33,7 +33,15 @@ Complete engineering record for the **ZeroEntropy `zerank-2-reranker`** (4.0B de
   - Unlocked Volta Tensor Core HMMA and GQA flash attention on sm_72 (cc 720).
 - **Report:** [zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md](zerank-2/2026-11-10-zerank-2-causal-reranker-optimization.md).
 
-### 3. Future Architectural Campaigns
+### 3. [`k2-horizon/`](k2-horizon/) (Dense 4B/5B Volta Optimization Complete)
+Engineering record for **K2-Horizon 4B Q4_K_M** (36-layer dense transformer, 5.06B params, grouped RMSNorm, 250k vocab):
+- **Milestone Reached:**
+  - **29.74 +/- 0.23 tok/s decode** (+31.0% vs 22.71 baseline; `ffn_gate/up` at 97.7 GB/s, 83.2 GB/s whole-model throughput).
+  - **716.30 +/- 2.70 tok/s prefill (`pp2048`)** (+34.4% vs 533.06 baseline) via 4-warp vectorized `dequantize_block_q4_K<half>`.
+  - Native `f16` KV cache strictly beats `q8_0` KV across all depths `0..16384` (up to **+61.2% decode at 16k**: `17.31` vs `10.74 tok/s`).
+  - **Report:** [k2-horizon/2026-11-18-k2-horizon-4b-optimization.md](k2-horizon/2026-11-18-k2-horizon-4b-optimization.md).
+
+### 4. Future Architectural Campaigns
 Future model investigations (e.g., dense architectures like Qwen 2.5 / 3.8 27B, DeepSeek MoE, Gemma, or multimodal models) should create their own subfolder under `findings/<model-architecture>/` following the template and guidelines in [OPTIMIZATION-GUIDE.md](../OPTIMIZATION-GUIDE.md).
 
 ---

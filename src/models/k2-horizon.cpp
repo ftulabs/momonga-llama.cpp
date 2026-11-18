@@ -120,18 +120,26 @@ std::unique_ptr<llm_graph_context> llama_model_k2_horizon::build_arch_graph(cons
     return std::make_unique<graph>(params);
 }
 
-// RMS norm over n_groups equal slices of ne[0], then one full-width weight
-static ggml_tensor * k2_horizon_group_rms_norm(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * weight, int64_t n_groups, float eps) {
+// RMS norm over n_groups equal slices of ne[0], then multiply by weight in grouped layout
+// so ggml-cuda fuses RMS_NORM + MUL before reshaping back to 2D.
+static ggml_tensor * k2_horizon_group_rms_norm(ggml_context * ctx, ggml_cgraph * gf, ggml_tensor * cur, ggml_tensor * weight, int64_t n_groups, float eps) {
     GGML_ASSERT(n_groups > 0 && cur->ne[0] % n_groups == 0);
 
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
 
+    ggml_tensor * w2d = nullptr;
+    if (weight) {
+        w2d = ggml_reshape_2d(ctx, weight, n_embd / n_groups, n_groups);
+        ggml_build_forward_expand(gf, w2d);
+    }
+
     cur = ggml_reshape_3d(ctx, cur, n_embd / n_groups, n_groups, n_tokens);
     cur = ggml_rms_norm(ctx, cur, eps);
-    cur = ggml_reshape_2d(ctx, cur, n_embd, n_tokens);
-
-    return weight ? ggml_mul(ctx, cur, weight) : cur;
+    if (w2d) {
+        cur = ggml_mul(ctx, cur, w2d);
+    }
+    return ggml_reshape_2d(ctx, cur, n_embd, n_tokens);
 }
 
 // MoVA: route each token to n_value_expert_used value experts, V = sum_k w_k * silu(W_k x)
@@ -238,7 +246,7 @@ llama_model_k2_horizon::graph::graph(const llm_graph_params & params) : llm_grap
         const bool is_moe_layer  = n_expert > 0 && (uint32_t) il >= hparams.n_layer_dense_lead;
         const bool is_mova_layer = is_moe_layer && hparams.n_value_expert > 0;
 
-        cur = k2_horizon_group_rms_norm(ctx0, inpL, layer.attn_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);
+        cur = k2_horizon_group_rms_norm(ctx0, gf, inpL, layer.attn_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);
         cb(cur, "attn_norm", il);
 
         // self-attention
@@ -299,7 +307,7 @@ llama_model_k2_horizon::graph::graph(const llm_graph_params & params) : llm_grap
         ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
         cb(ffn_inp, "ffn_inp", il);
 
-        cur = k2_horizon_group_rms_norm(ctx0, ffn_inp, layer.ffn_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);
+        cur = k2_horizon_group_rms_norm(ctx0, gf, ffn_inp, layer.ffn_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);
         cb(cur, "ffn_norm", il);
 
         if (is_moe_layer) {
@@ -345,7 +353,7 @@ llama_model_k2_horizon::graph::graph(const llm_graph_params & params) : llm_grap
         inpL = cur;
     }
 
-    cur = k2_horizon_group_rms_norm(ctx0, inpL, model.output_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);
+    cur = k2_horizon_group_rms_norm(ctx0, gf, inpL, model.output_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 

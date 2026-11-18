@@ -153,10 +153,41 @@ static __global__ void dequantize_block_q3_K(const void * __restrict__ vx, dst_t
 }
 
 template<typename dst_t>
-static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
-    const int64_t i = blockIdx.x;
+static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t * __restrict__ yy, const int64_t nb) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.y + threadIdx.y;
+    if (i >= nb) {
+        return;
+    }
 
-    dequantize_q4_K(vx, i, yy + i*QK_K, threadIdx.x);
+    if constexpr (std::is_same_v<dst_t, half>) {
+        const block_q4_K * x = (const block_q4_K *) vx;
+        const int tid = threadIdx.x;
+        const int64_t il = tid / 8;
+        const int64_t ir = tid % 8;
+        const int64_t is = 2 * il;
+
+        half * y = yy + i * QK_K + 64 * il + 4 * ir;
+
+        const float dall = __low2half(x[i].dm);
+        const float dmin = __high2half(x[i].dm);
+
+        uint8_t sc, m;
+        get_scale_min_k4(is + 0, x[i].scales, sc, m);
+        const float d1 = dall * sc; const float m1 = dmin * m;
+        get_scale_min_k4(is + 1, x[i].scales, sc, m);
+        const float d2 = dall * sc; const float m2 = dmin * m;
+
+        const uint32_t q4 = *(const uint32_t *)(x[i].qs + 32 * il + 4 * ir);
+        union { half2 h[2]; uint2 u; } p0, p1;
+        p0.h[0] = make_half2(d1 * ( q4        & 0xF) - m1, d1 * ((q4 >>  8) & 0xF) - m1);
+        p0.h[1] = make_half2(d1 * ((q4 >> 16) & 0xF) - m1, d1 * ((q4 >> 24) & 0xF) - m1);
+        p1.h[0] = make_half2(d2 * ((q4 >>  4) & 0xF) - m2, d2 * ((q4 >> 12) & 0xF) - m2);
+        p1.h[1] = make_half2(d2 * ((q4 >> 20) & 0xF) - m2, d2 * ((q4 >> 28) & 0xF) - m2);
+        *(uint2 *)(y +  0) = p0.u;
+        *(uint2 *)(y + 32) = p1.u;
+    } else {
+        dequantize_q4_K(vx, i, yy + i*QK_K, threadIdx.x);
+    }
 }
 
 template<typename dst_t>
@@ -303,8 +334,10 @@ static void dequantize_row_q4_1_cuda(const void * vx, dst_t * y, const int64_t k
 
 template<typename dst_t>
 static void dequantize_row_q4_K_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
-    const int nb = k / QK_K;
-    dequantize_block_q4_K<<<nb, 32, 0, stream>>>(vx, y);
+    const int64_t nb = k / QK_K;
+    const dim3 block_dims(32, 4, 1);
+    const int64_t nblocks = (nb + 3) / 4;
+    dequantize_block_q4_K<<<nblocks, block_dims, 0, stream>>>(vx, y, nb);
 }
 
 template<typename dst_t>
