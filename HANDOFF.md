@@ -42,8 +42,9 @@ dropped, `-ub` becomes a free prefill parameter. Two configurations, both curren
 - **A fourth optimized profile exists as of 2026-11-18: `K2-Horizon-4B-Q4_K_M` (`run-k2-horizon-4b.sh`).**
   Dense 36-layer transformer (`5.06B` params, `n_embd=2560`, `n_ff=10240`, grouped RMSNorm `n_groups=2`, `250k` vocab) on `/mnt/ssd/models/K2-Horizon-4B-Q4_K_M.gguf` (2.93 GiB).
   Fused grouped RMSNorm + multiply (`src/models/k2-horizon.cpp`), vectorized 4-warp `dequantize_block_q4_K<half>` (`ggml/src/ggml-cuda/convert.cu`),
-  unfused Volta dense `Q4_K`/`Q6_K` MMVQ (`ggml/src/ggml-cuda/ggml-cuda.cu`), and Volta dense `Q4_K` `nwarps=1, rpb=4` (`97.7 GB/s`) + `Q6_K` `small_k` (`ggml/src/ggml-cuda/mmvq.cu`)
-  deliver **29.74 tok/s** decode (+31.0% vs 22.71 baseline) and **716.30 tok/s** prefill (`pp2048`, +34.4%) with zero environment overrides.
+  unfused Volta dense `Q4_K`/`Q6_K` MMVQ (`ggml/src/ggml-cuda/ggml-cuda.cu`), Volta dense `Q4_K` `nwarps=1, rpb=4` (`97.7 GB/s`) + `Q6_K` `small_k` with 16-block/SM occupancy (`ggml/src/ggml-cuda/mmvq.cu`),
+  PR `#32004` + intra-graph `src1` `q8_1`/`f16` conversion cache (`ggml/src/ggml-cuda/ggml-cuda.cu`), `float4` contiguous GLU (`ggml/src/ggml-cuda/unary.cu`), and compact `rope.cu` `block_y`
+  deliver **30.06 tok/s** decode (+32.4% vs 22.71 baseline; `29.06 tok/s` server `-bs` median) and **729.41 tok/s** prefill (`pp2048`, +36.8%) with zero environment overrides.
   Native `f16` KV (`-ctk f16 -ctv f16`) strictly outperforms `q8_0` KV across all depths `0..16384` (up to **17.31 vs 10.74 tok/s** at `d=16384`).
   Turnkey runner: `runbest/run-k2-horizon-4b.sh` (port `8087`, `-c 32768`, `-ub 2048 -b 2048`, `-bs`).
   Full report: `findings/k2-horizon/2026-11-18-k2-horizon-4b-optimization.md`.

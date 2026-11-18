@@ -19,7 +19,7 @@ Each script embeds verified hardware flags discovered and validated through empi
 | [`run-deepseek-v4-9b.sh`](run-deepseek-v4-9b.sh) | `8084` | Qwen 3.5 9B Dense | Q8_0 (9.79 GB) | High-Precision Reasoning | Full Q8_0 lossless weights, 16k context |
 | [`run-spark-4b.sh`](run-spark-4b.sh) | `8085` | Spark 4.0B Dense | Q8_0 (4.38 GB) | Ultra-Fast Edge LLM | Sub-80ms decode latency, <5 GB VRAM |
 | [`run-embeddinggemma-2.sh`](run-embeddinggemma-2.sh) | `8086` | EmbeddingGemma-2 + Vision | Q8_0 (310 MB) | Multimodal Embedding | Text + image vector search (/v1/embeddings) |
-| [`run-k2-horizon-4b.sh`](run-k2-horizon-4b.sh) | `8087` | K2-Horizon Dense 5.06B | Q4_K_M (2.93 GiB) | Fast Dense LLM (`f16` KV) | **29.74 tok/s** decode, **716.3 tok/s** prefill (`pp2048`) |
+| [`run-k2-horizon-4b.sh`](run-k2-horizon-4b.sh) | `8087` | K2-Horizon Dense 5.06B | Q4_K_M (2.93 GiB) | Fast Dense LLM (`f16` KV) | **30.06 tok/s** decode, **729.4 tok/s** prefill (`pp2048`) |
 
 To list all available runners in terminal:
 ```bash
@@ -199,8 +199,8 @@ All scripts adhere to a uniform, robust convention:
 - **Architecture:** Dense 36-layer `k2-horizon` (5.06B params, GQA 32/8, grouped RMSNorm `n_groups=2`, 250k vocab).
 - **Hardware Enhancements:**
   - Grouped RMSNorm + weight multiply fusion in `src/models/k2-horizon.cpp`.
-  - Vectorized 4-warp `dequantize_block_q4_K<half>` prefill kernel (`+34%` `pp2048` -> `716.3 tok/s`).
-  - Volta `sm_72` dense `Q4_K` MMVQ unfused `nwarps=1, rpb=4` (`97.7 GB/s` on `ffn_gate/up`, `29.74 tok/s` decode) and `Q6_K` `small_k` (`nwarps=2, rpb=4`).
+  - Vectorized 4-warp `dequantize_block_q4_K<half>`, intra-graph `src1` `f16` cache, `float4` contiguous GLU, and compact `rope.cu` `block_y` (`+36.8%` `pp2048` -> `729.41 tok/s`).
+  - Volta `sm_72` dense `Q4_K` MMVQ unfused `nwarps=1, rpb=4` (`97.7 GB/s` on `ffn_gate/up`), `Q6_K` `small_k` (`64` regs, `16` blocks/SM), PR `#32004`, and intra-graph `src1` `q8_1` cache (`30.06 tok/s` standalone decode, `29.06 tok/s` server `-bs` median).
   - Native `f16` KV cache (strictly outperforms `q8_0` across all depths `0..16384`, up to `+61.2%` decode at 16k).
   - GPU backend sampling (`-bs`) offloads 250k-vocab sampling.
 - **Test Request:**

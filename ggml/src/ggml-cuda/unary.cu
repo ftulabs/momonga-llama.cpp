@@ -320,8 +320,40 @@ static __global__ void unary_gated_op_kernel(const T * x, const T * g, T * dst, 
     dst[i] = ggml_cuda_cast<T>(op(ggml_cuda_cast<float>(x[j0])) * ggml_cuda_cast<float>(g[j1]));
 }
 
+template <float (*op)(float)>
+static __global__ void unary_gated_op_kernel_f32x4(
+        const float4 * __restrict__ x,
+        const float4 * __restrict__ g,
+        float4 * __restrict__ dst,
+        const int64_t k4) {
+    ggml_cuda_pdl_lc();
+    const int64_t i = int64_t(blockDim.x)*blockIdx.x + threadIdx.x;
+    if (i >= k4) {
+        return;
+    }
+    ggml_cuda_pdl_sync();
+    const float4 xv = x[i];
+    const float4 gv = g[i];
+    dst[i] = make_float4(
+        op(xv.x) * gv.x,
+        op(xv.y) * gv.y,
+        op(xv.z) * gv.z,
+        op(xv.w) * gv.w);
+}
+
 template <float (*op)(float), typename T>
 static void unary_gated_cuda(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1, cudaStream_t stream) {
+    if constexpr (std::is_same_v<T, float>) {
+        if (o0 == n && o1 == n && (k % 4 == 0) &&
+                ((((uintptr_t) x | (uintptr_t) g | (uintptr_t) dst) & 15) == 0)) {
+            const int64_t k4 = k / 4;
+            const int64_t num_blocks = (k4 + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
+            const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params((dim3) num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream);
+            ggml_cuda_kernel_launch(unary_gated_op_kernel_f32x4<op>, launch_params,
+                (const float4 *) x, (const float4 *) g, (float4 *) dst, k4);
+            return;
+        }
+    }
     const int64_t num_blocks = (k + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params((dim3)num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream);
     ggml_cuda_kernel_launch(unary_gated_op_kernel<op, T>, launch_params, x, g, dst, k, n, o0, o1);

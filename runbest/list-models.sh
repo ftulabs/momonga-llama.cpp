@@ -19,7 +19,7 @@ run-qwen38-27b.sh          8083  16,384    Qwen 3.8 27B Dense Coder Q4_K_M   Den
 run-deepseek-v4-9b.sh      8084  16,384    DeepSeek-V4-Pro 9B Q8_0           Dense 9B Zero-Loss Reasoning
 run-spark-4b.sh            8085  16,384    Spark-X2.6 4B Q8_0                Ultra-Fast Edge Model (<80ms/tok)
 run-embeddinggemma-2.sh    8086  8,192     EmbeddingGemma-2 Q8_0 + Vision    Multimodal Vector Embeddings
-run-k2-horizon-4b.sh       8087  32,768    K2-Horizon 4B Q4_K_M (Dense 5B)   29.7 tok/s decode, 716 tok/s prefill, f16 KV
+run-k2-horizon-4b.sh       8087  32,768    K2-Horizon 4B Q4_K_M (Dense 5B)   30.1 tok/s decode, 729 tok/s prefill, f16 KV
 
 ====================================================================================================
 USAGE EXAMPLES:

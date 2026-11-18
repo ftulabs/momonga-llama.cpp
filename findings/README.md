@@ -36,8 +36,8 @@ Complete engineering record for the **ZeroEntropy `zerank-2-reranker`** (4.0B de
 ### 3. [`k2-horizon/`](k2-horizon/) (Dense 4B/5B Volta Optimization Complete)
 Engineering record for **K2-Horizon 4B Q4_K_M** (36-layer dense transformer, 5.06B params, grouped RMSNorm, 250k vocab):
 - **Milestone Reached:**
-  - **29.74 +/- 0.23 tok/s decode** (+31.0% vs 22.71 baseline; `ffn_gate/up` at 97.7 GB/s, 83.2 GB/s whole-model throughput).
-  - **716.30 +/- 2.70 tok/s prefill (`pp2048`)** (+34.4% vs 533.06 baseline) via 4-warp vectorized `dequantize_block_q4_K<half>`.
+  - **30.06 +/- 0.18 tok/s decode** (+32.4% vs 22.71 baseline; `ffn_gate/up` at 97.7 GB/s, `Q6_K` `lm_head` cut `5.93 -> 5.55 ms` via `64`-reg `16` blocks/SM, `src1` `q8_1` cache cuts `quantize_q8_1` calls `181 -> 73`).
+  - **729.41 +/- 2.71 tok/s prefill (`pp2048`)** (+36.8% vs 533.06 baseline; `688.92 +/- 5.40` `pp512` `-ub 1024`) via 4-warp vectorized `dequantize_block_q4_K<half>`, `src1` `f16` cache, `float4` contiguous GLU, and right-sized `rope.cu` `block_y`.
   - Native `f16` KV cache strictly beats `q8_0` KV across all depths `0..16384` (up to **+61.2% decode at 16k**: `17.31` vs `10.74 tok/s`).
   - **Report:** [k2-horizon/2026-11-18-k2-horizon-4b-optimization.md](k2-horizon/2026-11-18-k2-horizon-4b-optimization.md).
 

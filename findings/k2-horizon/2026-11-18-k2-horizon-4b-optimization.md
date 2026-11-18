@@ -13,14 +13,15 @@ Optimized end-to-end inference for `K2-Horizon-4B-Q4_K_M.gguf` without modifying
 
 | Metric / Test (`llama-bench`, `-ngl 99 -fa 1 -b 2048 -r 5`) | Baseline (`28b918b`, `-ctk q8_0 -ctv q8_0 -ub 1024`) | Optimized (`-ctk f16 -ctv f16 -ub 2048`) | Delta |
 |---|---:|---:|---:|
-| **`tg128` (Decode)** | `22.71 +/- 0.11 tok/s` | **`29.74 +/- 0.23 tok/s`** | **+31.0%** |
-| **`pp512` (Prefill, `-ub 1024`)** | `537.24 +/- 11.32 tok/s` | **`680.62 +/- 8.23 tok/s`** | **+26.7%** |
-| **`pp2048` (Prefill, `-ub 2048`)** | `533.06 +/- 59.83` (`-ub 1024` `612.48`) | **`716.30 +/- 2.70 tok/s`** | **+34.4%** (+17.0% vs `612.48`) |
+| **`tg128` (Decode)** | `22.71 +/- 0.11 tok/s` | **`30.06 +/- 0.18 tok/s`** (round 1: `29.74 +/- 0.23`) | **+32.4%** |
+| **`pp512` (Prefill, `-ub 1024`)** | `537.24 +/- 11.32 tok/s` | **`688.92 +/- 5.40 tok/s`** (round 1: `680.62 +/- 8.23`) | **+28.2%** |
+| **`pp2048` (Prefill, `-ub 2048`)** | `533.06 +/- 59.83` (`-ub 1024` `612.48`) | **`729.41 +/- 2.71 tok/s`** (round 1: `716.30 +/- 2.70`) | **+36.8%** (+19.1% vs `612.48`) |
 | **`tg128 @ d=16384`** | N/A (`q8_0` KV = `10.74 +/- 0.01 tok/s`) | **`17.31 +/- 0.08 tok/s`** (`f16` KV) | **+61.2% vs `q8_0` KV** |
-| **`llama-completion -no-cnv -temp 0 -n 64`** | `22.52 tok/s` (`2797.38 ms`) | **`29.68 tok/s`** (`2122.99 ms`, `0/0` reallocs) | **+31.8%** |
+| **`llama-completion -c 8192 -no-cnv -temp 0 -n 64`** | `22.52 tok/s` (`2797.38 ms`) | **`29.97 tok/s`** (`2101.85 ms`, `0/0` reallocs) | **+33.1%** |
 
-- At `29.74 tok/s` with ~2,796 MB active weights read per decode pass, effective whole-model DRAM throughput reaches **83.2 GB/s** (75% of the 110-112 GB/s hardware read ceiling, with `ffn_gate/up` measuring **97.7 GB/s** in `ncu`).
-- `Cyber-Tiel-Coder-35B-A3B-tg.gguf` regression check confirms **zero regression** (bit-identical `0.66008` draft acceptance / `2.19` mean len between clean `HEAD` CUDA and patched build on `prompt2.txt`).
+- At `30.06 tok/s` with ~2,796 MB active weights read per decode pass, effective whole-model DRAM throughput reaches **84.0 GB/s** (75-76% of the 110-112 GB/s hardware read ceiling, with `ffn_gate/up` measuring **97.7 GB/s** in `ncu`).
+- Perplexity parity (`bench/ppl.sh`, `prompt-32k.txt`, 60 chunks, ctx 512): **`2.5997 +/- 0.04012`** (identical to round 1 and unpatched baseline).
+- `Cyber-Tiel-Coder-35B-A3B-tg.gguf` regression check (`k2-inc3-cybertiel`, `NPRED=400`, `REPS=5`) confirms **zero regression** (`22.12-22.74 tok/s`, median `22.52 tok/s`, bit-identical `0.66008` draft acceptance / `2.19` mean len).
 
 ---
 
@@ -70,6 +71,17 @@ Optimized end-to-end inference for `K2-Horizon-4B-Q4_K_M.gguf` without modifying
    - Interleaved A/B/B/A (`Q6K_NW1=1,0,0,1`, `tg128 -r 5`) confirmed `Q6_K` `nwarps=2` (`29.91 / 29.77`, mean `29.840 tok/s`) beats `Q6_K` `nwarps=1` (`29.68 / 29.76`, mean `29.720 tok/s`) by **+0.40%**.
 5. **UI Asset Validator (`scripts/ui-assets.cmake`):**
    - Accepted `service-worker.js` alongside `workbox*.js` so `latest` HuggingFace `llama-ui` downloads build cleanly.
+6. **Volta `Q6_K` 16-Block Occupancy Bound (`ggml/src/ggml-cuda/mmvq.cu`):**
+   - `calc_min_blocks_per_sm` returns `16` on Volta (`700 <= __CUDA_ARCH__ < 750`) for `type == GGML_TYPE_Q6_K && ncols_dst == 1`.
+   - Verified in `ncu`: cuts registers `95 -> 64` with `0` local spill sectors, raising occupancy `29.76% -> 47.02%` (`ffn_down` `242.14 -> 235.68 us`) and `29.77% -> 48.46%` (`lm_head` `5.93 -> 5.55 ms`, `-6.4%`, `lg_throttle` `26.22% -> 13.68%`).
+7. **Upstream PR #32004 + Intra-Graph `src1` `q8_1`/`f16` Conversion Cache (`ggml/src/ggml-cuda/mmvq.cuh`, `mmvq.cu`, `ggml-cuda.cu`):**
+   - Ported PR `#32004`: `ggml_backend_cuda_graph_compute` skips `ggml_cuda_graph_check_compability` when `cgraph->uid != 0 && cgraph->uid == graph->uid`.
+   - Added thread-local `ggml_cuda_src1_conv_cache` scoped to `ggml_cuda_graph_evaluate_and_capture` reusing `q8_1` (decode `ggml_cuda_mul_mat_vec_q` optional `prequantized_y`) and `f16` (`ggml_cuda_mul_mat_cublas_impl<GGML_TYPE_F16>`) across consecutive projections sharing `src1` (`Q/K/V` and `ffn_gate/up`), invalidating conservatively on view writes, fused skips, concurrent events, or pass completion.
+   - Verified in `nsys`: decode `quantize_q8_1` (`gridX=10`) fell `181 -> 73` launches (`0.55 -> 0.21 ms`, `-108` graph nodes, `tg64` total GPU kernel time `32.82 -> 32.36 ms`); `pp2048` `convert_unary_cont_vec4<float, __half>` (`gridX=5120`) fell `178 -> 71` launches (`47.22 -> 18.70-19.11 ms`, `-28.5 ms`).
+8. **Vectorized `float4` Contiguous GLU/SwiGLU (`ggml/src/ggml-cuda/unary.cu`):**
+   - Added `unary_gated_op_kernel_f32x4` fast path when `o0 == n && o1 == n && k % 4 == 0` and 16-byte aligned, removing 64-bit div/mod per element and widening loads/stores to `float4` (`pp2048` `op_silu` `94.56 -> 60.96-78.51 ms` in `nsys`).
+9. **Right-Sized `head_dim` RoPE Block Y (`ggml/src/ggml-cuda/rope.cu`):**
+   - Set `block_y = ne00 <= 64 ? 32 : (ne00 <= 128 ? 64 : CUDA_ROPE_BLOCK_SIZE)` in `rope_norm_cuda`, `rope_neox_cuda`, `rope_multi_cuda`, `rope_vision_cuda` (eliminating 192 idle threads/CTA at `head_dim=128`; `pp2048` `rope_neox` `41.34 -> 29.15-29.32 ms`, `-29%`).
 
 ---
 
@@ -92,24 +104,27 @@ Prediction before test (that `q8_0` half-byte KV reads would overtake `f16` arou
 ### 5.2. Server `-bs` (`--backend-sampling`) A/B/B/A (`bench/prefill.sh`, `DECODE_REPS=5, NPRED=400, LENS=2048`)
 
 - **Decode (`prompt2.txt`, 400 tokens):**
-  - `no-bs`: medians `28.00` (arm 1) and `28.41` (arm 4), pooled mean `28.21 tok/s`.
-  - `-bs`: medians `28.71` (arm 2) and `28.74` (arm 3), pooled mean **`28.73 tok/s`** (**+1.84%**).
+  - `no-bs` (round 1): medians `28.00` (arm 1) and `28.41` (arm 4), pooled mean `28.21 tok/s`.
+  - `-bs` (round 1): medians `28.71` (arm 2) and `28.74` (arm 3), pooled mean `28.73 tok/s` (`+1.84%`).
+  - `-bs` (round 2, `k2-srv-bs-inc3`): `28.91 / 29.06 / 29.07 / 29.14 / 28.90 tok/s`, median **`29.06 tok/s`**.
 - **Prefill (`2,213 tokens`, `cache_prompt: false`):**
-  - `no-bs`: `648.4 / 658.1 tok/s` (TTFT `3,381 - 3,434 ms`).
-  - `-bs`: `617.2 / 620.1 tok/s` (TTFT `3,587 - 3,604 ms`, ~170 ms GPU sampler setup/sampling on 250k logits).
-- **Verdict:** `-bs` is retained in `runbest/run-k2-horizon-4b.sh` because it wins decode by `+1.84%` (breaking even in latency around ~265 generated tokens and preventing 250k CPU sort overhead under stochastic `top-k`/`top-p` chat sampling).
+  - `no-bs` (round 1): `648.4 / 658.1 tok/s` (TTFT `3,381 - 3,434 ms`).
+  - `-bs` (round 1): `617.2 / 620.1 tok/s` (TTFT `3,587 - 3,604 ms`, ~170 ms GPU sampler setup/sampling on 250k logits).
+  - `-bs` (round 2, `k2-srv-bs-inc3`): `637.7 / 634.4 / 636.1 tok/s`, summary (rep 1 dropped) **`635.2 tok/s`** (TTFT **`3,502 ms`**, prompt `3,484 ms`).
+- **Verdict:** `-bs` is retained in `runbest/run-k2-horizon-4b.sh` because it wins decode cleanly and eliminates CPU sort overhead on the 250k vocabulary under stochastic sampling.
 
 ### 5.3. ServerBench End-to-End Replay (`bench/serverbench_eval.py`)
 
 Evaluated `runbest/run-k2-horizon-4b.sh` on `bench/workloads/serverbench_coding_sessions.json` (`--p90-ttft 12.0 --p90-tpot 45.0 --tokengate-k 0`):
-- **Attainment:** `83.33%` (5/6 turns qualified; `session_refactoring` 37.2-38.2 ms p90 TPOT, 0.25-4.78 s TTFT; `session_agent_cli_tool` 35.2-35.8 ms p90 TPOT, 0.42-0.49 s TTFT; 8,002-token `session_needle_retrieval` read 14.852 s TTFT and 47.9 ms p90 TPOT).
-- **Throughput & Power (`tegrastats`):** `288.93 gross tok/s`, `111.56 LQT/s` (`5,064 / 13,115` billable tokens), `42.38 W` mean power, `1878.08 J` consumed, **2.696 LQT/Joule** (`6.98` gross tok/J).
+- **Round 1 (`ec4f80d`):** `83.3%` attainment (5/6 turns; `session_refactoring` 37.2-38.2 ms p90 TPOT, `session_needle_retrieval` 14.852 s TTFT / 47.9 ms p90 TPOT), `288.93 gross tok/s`, `111.56 LQT/s` (`5,064 / 13,115`), `42.38 W`, `1878.08 J`, `2.696 tokens/Joule`.
+- **Round 2 (`k2-horizon-4b-round2`):** `83.3%` attainment (5/6 turns; `session_refactoring` **`36.0-36.5 ms`** p90 TPOT and `0.244-4.685 s` TTFT; `session_agent_cli_tool` `35.2 ms` p90 TPOT and `0.425-0.488 s` TTFT; 8,002-token `session_needle_retrieval` `14.875 s` TTFT and **`46.0 ms`** p90 TPOT), **`293.36 gross tok/s`**, **`113.27 LQT/s`** (`5,064 / 13,115` billable tokens), `43.02 W` mean power, `1877.20 J` consumed, **`2.698 tokens/Joule`** (`370.69 J / 1k qualified tok`).
 
 ### 5.4. Cyber-Tiel Zero-Regression Check
 
 Ran `bench/one.sh` on `Cyber-Tiel-Coder-35B-A3B-tg.gguf` (`NPRED=400, REPS=5`):
 - Clean `HEAD` CUDA (`k2-head-check`, rep 1): `PP 45.18 tok/s`, `TG 22.29 tok/s`, `acceptance = 0.66008`, `mean_len = 2.19`.
-- Patched build (`k2-reg-cybertiel-np400`, reps 1..5): `TG 22.19 / 22.78 / 22.84 / 22.88 / 22.97 tok/s`, `acceptance = 0.66008`, `mean_len = 2.19` (bit-identical acceptance/length).
+- Round 1 build (`k2-reg-cybertiel-np400`, reps 1..5): `TG 22.19 / 22.78 / 22.84 / 22.88 / 22.97 tok/s`, `acceptance = 0.66008`, `mean_len = 2.19`.
+- Round 2 build (`k2-inc3-cybertiel`, reps 1..5): `TG 22.12 / 22.38 / 22.52 / 22.72 / 22.74 tok/s`, `acceptance = 0.66008`, `mean_len = 2.19` (bit-identical acceptance/length).
 
 ---
 
@@ -118,7 +133,12 @@ Ran `bench/one.sh` on `Cyber-Tiel-Coder-35B-A3B-tg.gguf` (`NPRED=400, REPS=5`):
 1. **`GGML_CUDA_MMQ_FORCE=1` on dense `Q4_K` prefill:** Measured `pp512 = 315.98 +/- 1.44 tok/s` (~2x slower than FP16 Tensor Core `cutlass_70_tensorop_s884gemm_f16`).
 2. **`fattn-mma-f16.cuh` Volta `Q_in_reg=false` configs:** `nthreads=256, occ=2` (`STACK: 224`) gave `pp2048 = 627.23 tok/s`; `nthreads=256, occ=1` (`REG: 196, STACK: 48`) gave `pp2048 = 672.28 tok/s`, both slower than upstream `Q_in_reg=true` (`716.30 tok/s`). Reverted.
 3. **`MMVQ_PARAMETERS_TURING` alternative thread layouts (`f16` KV):** `nwarps=2, rpb=2` regressed (`27.21` unfused / `26.81` fused); `nwarps=1, rpb=8` (`REG: 96`) read `29.87 +/- 0.15` (flat vs `rpb=4`, heavier spill risk).
-4. **Post-hoc `all-Q4_K` requantization (`Q4_K_S` + `^output\.weight=q4_k` via `--allow-requantize`):**
+4. **`vecdotq.cuh` aligned/funnelshift `get_int2_b2` in `vec_dot_q6_K_q8_1`:** Replaced 17 unaligned 16-bit loads per 210-byte block with aligned 32-bit + `__funnelshift_r` loads. Tested in `ncu`: `ffn_down` regressed `242.14 -> 277.41 us` and `lm_head` regressed `5.93 -> 6.15 ms` with unchanged L1TEX sectors. Reverted cleanly.
+5. **Upstream PR surveys not applicable / closed for K2-Horizon on `sm_72`:**
+   - PR `#32407`: only applies to `nstages > 1` `cp.async` FlashAttention paths (`Volta` uses `nstages = 1`).
+   - PR `#32521`: `fattn-vec` asm/mask tuning (`K2-Horizon` `gqa_ratio = 4` routes via `fattn-tile`).
+   - PR `#32500`: `RMS_NORM+MUL+MROPE` fusion does not cross intermediate matmuls in `K2-Horizon`, though its block-size observation motivated the `rope.cu` `block_y` fix.
+6. **Post-hoc `all-Q4_K` requantization (`Q4_K_S` + `^output\.weight=q4_k` via `--allow-requantize`):**
    - Shrunk file `2,999.44 MiB (4.97 BPW)` -> `2,727.82 MiB (4.52 BPW)`, verified `327` tensors (`246 Q4_K`, `73 F32`, `8 Q5_K`).
    - Measured `tg128 = 33.41 +/- 0.22 tok/s` (+12.3%), `pp512 = 663.44 +/- 5.15`, `pp2048 = 708.23 +/- 2.34`.
    - Perplexity (`bench/ppl.sh`, `prompt-32k.txt`, 60 chunks, ctx 512): degraded from **`2.5997 +/- 0.04012`** (baseline `Q4_K_M`) to **`2.6546 +/- 0.04151`** (+0.0549 / +2.11%) due to double quantization of `Q6_K -> Q4_K`. Rejected and temporary GGUF deleted; use native BF16 -> `Q4_K_S` if lower BPW is desired without double-quant loss.

@@ -11,10 +11,10 @@
 #
 # Key Features & Optimizations:
 #   - Grouped RMSNorm + weight multiply fusion in src/models/k2-horizon.cpp
-#   - Vectorized 4-warp dequantize_block_q4_K<half> for prefill (+34% pp2048 -> 716 tok/s)
-#   - Volta sm_72 dense Q4_K MMVQ (unfused + nwarps=1, rpb=4 -> 97.7 GB/s; Q6_K small_k)
-#   - Decode: 29.74 tok/s standalone (+31.0% vs 22.71 baseline), ~28.7 tok/s server
-#   - Prefill: 716.3 tok/s at pp2048 (-ub 2048 -b 2048)
+#   - Vectorized 4-warp dequantize_block_q4_K<half> + f16 src1 cache + f32x4 GLU + compact RoPE
+#   - Volta sm_72 dense Q4_K MMVQ (unfused, nwarps=1 rpb=4 -> 97.7 GB/s), Q6_K small_k (64 regs), q8_1 cache
+#   - Decode: 30.06 tok/s standalone (+32.4% vs 22.71 baseline), 29.06 tok/s server median
+#   - Prefill: 729.4 tok/s at pp2048 (-ub 2048 -b 2048), 688.9 tok/s at pp512 (-ub 1024)
 #   - Native f16 KV cache (-ctk f16 -ctv f16): strictly faster than q8_0 at all depths
 #     (up to +61.2% decode at d=16384: 17.31 vs 10.74 tok/s)
 #   - Host flag -bs (--backend-sampling) offloads 250k-vocab sampling to GPU
